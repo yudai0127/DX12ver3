@@ -1,0 +1,99 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClInclude Include="SourceCode\RHI\SwapChain.h" />
+    <ClInclude Include="SourceCode\Framework\Framework.h" />
+    <ClInclude Include="SourceCode\RHI\DepthBuffer.h" />
+    <ClInclude Include="SourceCode\RHI\Device.h" />
+    <ClInclude Include="SourceCode\RHI\CommandContext.h" />
+    <ClInclude Include="SourceCode\RHI\Fence.h" />
+    <ClInclude Include="Until\imgui\imgui.h" />
+    <ClInclude Include="Until\imgui\imgui_impl_dx12.h" />
+    <ClInclude Include="Until\imgui\imgui_impl_win32.h" />
+    <ClInclude Include="Until\imgui\imgui_internal.h" />
+    <ClInclude Include="Until\imgui\imconfig.h" />
+    <ClInclude Include="Until\imgui\imstb_rectpack.h" />
+    <ClInclude Include="Until\imgui\imstb_textedit.h" />
+    <ClInclude Include="Until\imgui\imstb_truetype.h" />
+    <ClInclude Include="SourceCode\ImGui\ImguiManager.h" />
+    <ClInclude Include="SourceCode\Graphics\Sprite.h" />
+    <ClInclude Include="SourceCode\Core\GameObject.h" />
+    <ClInclude Include="SourceCode\Core\Component.h" />
+    <ClInclude Include="SourceCode\Core\Scene.h" />
+    <ClInclude Include="SourceCode\Core\Transform.h" />
+    <ClInclude Include="SourceCode\Component\SpriteRenderer.h" />
+    <ClInclude Include="SourceCode\Graphics\Texture.h" />
+    <ClInclude Include="SourceCode\RHI\DescriptorHeap.h" />
+    <ClInclude Include="SourceCode\RHI\Devicemanager.h" />
+    <ClInclude Include="SourceCode\Graphics\Spritebatch.h" />
+    <ClInclude Include="SourceCode\Component\Spritebatchrenderer.h" />
+    <ClInclude Include="SourceCode\Graphics\Shadermanager.h" />
+    <ClInclude Include="SourceCode\Camera\Camera.h" />
+    <ClInclude Include="SourceCode\Graphics\Mesh.h" />
+    <ClInclude Include="SourceCode\Component\MeshRenderer.h" />
+    <ClInclude Include="SourceCode\Graphics\Gltfmodel.h" />
+    <ClInclude Include="SourceCode\Component\Modelrenderer.h" />
+    <ClInclude Include="SourceCode\ImGui\ShaderEditor.h" />
+    <ClInclude Include="SourceCode\RHI\ConstantBuffer.h" />
+    <ClInclude Include="SourceCode\RHI\PipelineBuilder.h" />
+    <ClInclude Include="SourceCode\RHI\GpuBuffer.h" />
+    <ClInclude Include="SourceCode\RHI\RootSignatureBuilder.h" />
+    <ClInclude Include="SourceCode\Core\FrameTimer.h" />
+    <ClInclude Include="SourceCode\RHI\GpuTimer.h" />
+    <ClInclude Include="SourceCode\Core\RenderStats.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="SourceCode\RHI\SwapChain.cpp" />
+    <ClCompile Include="SourceCode\Main.cpp" />
+    <ClCompile Include="SourceCode\Framework\Framework.cpp" />
+    <ClCompile Include="SourceCode\RHI\DepthBuffer.cpp" />
+    <ClCompile Include="SourceCode\RHI\Device.cpp" />
+    <ClCompile Include="SourceCode\RHI\CommandContext.cpp" />
+    <ClCompile Include="SourceCode\RHI\Fence.cpp" />
+    <ClCompile Include="Until\imgui\imgui.cpp" />
+    <ClCompile Include="Until\imgui\imgui_demo.cpp" />
+    <ClCompile Include="Until\imgui\imgui_draw.cpp" />
+    <ClCompile Include="Until\imgui\imgui_impl_dx12.cpp" />
+    <ClCompile Include="Until\imgui\imgui_impl_win32.cpp" />
+    <ClCompile Include="Until\imgui\imgui_tables.cpp" />
+    <ClCompile Include="Until\imgui\imgui_widgets.cpp" />
+    <ClCompile Include="SourceCode\ImGui\ImguiManager.cpp" />
+    <ClCompile Include="SourceCode\Graphics\Sprite.cpp" />
+    <ClCompile Include="SourceCode\Core\Scene.cpp" />
+    <ClCompile Include="SourceCode\Core\GameObject.cpp" />
+    <ClCompile Include="SourceCode\Core\Transform.cpp" />
+    <ClCompile Include="SourceCode\Component\SpriteRenderer.cpp" />
+    <ClCompile Include="SourceCode\Graphics\Texture.cpp" />
+    <ClCompile Include="SourceCode\RHI\DescriptorHeap.cpp" />
+    <ClCompile Include="SourceCode\RHI\Devicemanager.cpp" />
+    <ClCompile Include="SourceCode\Graphics\Spritebatch .cpp" />
+    <ClCompile Include="SourceCode\Component\Spritebatchrenderer.cpp" />
+    <ClCompile Include="SourceCode\Graphics\Shadermanager.cpp" />
+    <ClCompile Include="SourceCode\Camera\Camera.cpp" />
+    <ClCompile Include="SourceCode\Graphics\Mesh.cpp" />
+    <ClCompile Include="SourceCode\Component\MeshRenderer.cpp" />
+    <ClCompile Include="SourceCode\Graphics\Gltfmodel.cpp" />
+    <ClCompile Include="SourceCode\Component\Modelrenderer.cpp" />
+    <ClCompile Include="SourceCode\ImGui\ShaderEditor.cpp" />
+    <ClCompile Include="SourceCode\RHI\ConstantBuffer.cpp" />
+    <ClCompile Include="SourceCode\RHI\PipelineBuilder.cpp" />
+    <ClCompile Include="SourceCode\RHI\GpuBuffer.cpp" />
+    <ClCompile Include="SourceCode\RHI\RootSignatureBuilder.cpp" />
+    <ClCompile Include="SourceCode\Core\FrameTimer.cpp" />
+    <ClCompile Include="SourceCode\RHI\GpuTimer.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="HLSL\Sprite.hlsli" />
+    <None Include="HLSL\Mesh.hlsli" />
+    <None Include="HLSL\GltfModel.hlsli" />
+    <None Include="HLSL\PBR.hlsli" />
+  </ItemGroup>
+  <ItemGroup>
+    <FxCompile Include="HLSL\Sprite_PS.hlsl" />
+    <FxCompile Include="HLSL\Sprite_VS.hlsl" />
+    <FxCompile Include="HLSL\Mesh_VS.hlsl" />
+    <FxCompile Include="HLSL\Mesh_PS.hlsl" />
+    <FxCompile Include="HLSL\GltfModel_VS.hlsl" />
+    <FxCompile Include="HLSL\GltfModel_PS.hlsl" />
+  </ItemGroup>
+</Project>
