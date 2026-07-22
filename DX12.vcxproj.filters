@@ -38,6 +38,9 @@
     <ClInclude Include="SourceCode\RHI\PipelineBuilder.h" />
     <ClInclude Include="SourceCode\RHI\GpuBuffer.h" />
     <ClInclude Include="SourceCode\RHI\RootSignatureBuilder.h" />
+    <ClInclude Include="SourceCode\RHI\RaytracingAccel.h" />
+    <ClInclude Include="SourceCode\RHI\RaytracingPipeline.h" />
+    <ClInclude Include="SourceCode\Graphics\RaytracingRenderer.h" />
     <ClInclude Include="SourceCode\Core\FrameTimer.h" />
     <ClInclude Include="SourceCode\RHI\GpuTimer.h" />
     <ClInclude Include="SourceCode\Core\RenderStats.h" />
@@ -79,6 +82,9 @@
     <ClCompile Include="SourceCode\RHI\PipelineBuilder.cpp" />
     <ClCompile Include="SourceCode\RHI\GpuBuffer.cpp" />
     <ClCompile Include="SourceCode\RHI\RootSignatureBuilder.cpp" />
+    <ClCompile Include="SourceCode\RHI\RaytracingAccel.cpp" />
+    <ClCompile Include="SourceCode\RHI\RaytracingPipeline.cpp" />
+    <ClCompile Include="SourceCode\Graphics\RaytracingRenderer.cpp" />
     <ClCompile Include="SourceCode\Core\FrameTimer.cpp" />
     <ClCompile Include="SourceCode\RHI\GpuTimer.cpp" />
   </ItemGroup>
@@ -87,6 +93,7 @@
     <None Include="HLSL\Mesh.hlsli" />
     <None Include="HLSL\GltfModel.hlsli" />
     <None Include="HLSL\PBR.hlsli" />
+    <None Include="HLSL\PathTrace.hlsl" />
   </ItemGroup>
   <ItemGroup>
     <FxCompile Include="HLSL\Sprite_PS.hlsl" />

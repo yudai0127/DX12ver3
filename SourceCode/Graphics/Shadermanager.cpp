@@ -120,3 +120,84 @@ std::vector<char> ShaderManager::CompileFromFile(const wchar_t* hlslPath,
     
     return std::vector<char>(p, p + shaderBlob->GetBufferSize());
 }
+
+//-----------------------------------------------------------------------------
+// CompileLibrary  -  Compile a DXR shader library (lib_6_3) with dxc.
+//   A library has no single entry point; all [shader("...")] functions in the
+//   file are exported. The resulting DXIL blob is fed to a state object.
+//-----------------------------------------------------------------------------
+std::vector<char> ShaderManager::CompileLibrary(const wchar_t* hlslPath,
+    const wchar_t* target)
+{
+    OutputDebugStringW(L"[ShaderManager] compile library: ");
+    OutputDebugStringW(hlslPath);
+    OutputDebugStringW(L"\n");
+
+    ComPtr<IDxcUtils>          utils;
+    ComPtr<IDxcCompiler3>      compiler;
+    ComPtr<IDxcIncludeHandler> includeHandler;
+    if (FAILED(DxcCreateInstance(CLSID_DxcUtils, IID_PPV_ARGS(&utils))) ||
+        FAILED(DxcCreateInstance(CLSID_DxcCompiler, IID_PPV_ARGS(&compiler))))
+    {
+        OutputDebugStringW(L"[ShaderManager] dxc init failed\n");
+        return {};
+    }
+    utils->CreateDefaultIncludeHandler(&includeHandler);
+
+    ComPtr<IDxcBlobEncoding> source;
+    if (FAILED(utils->LoadFile(hlslPath, nullptr, &source)))
+    {
+        OutputDebugStringW(L"[ShaderManager] cannot open .hlsl: ");
+        OutputDebugStringW(hlslPath);
+        OutputDebugStringW(L"\n");
+        return {};
+    }
+
+    // No -E for a library; just the library target.
+    LPCWSTR args[] =
+    {
+        hlslPath,
+        L"-T", target,
+        L"-Zi",
+        L"-Qembed_debug",
+    };
+
+    DxcBuffer sourceBuffer = {};
+    sourceBuffer.Ptr = source->GetBufferPointer();
+    sourceBuffer.Size = source->GetBufferSize();
+    sourceBuffer.Encoding = DXC_CP_ACP;
+
+    ComPtr<IDxcResult> result;
+    if (FAILED(compiler->Compile(
+        &sourceBuffer, args, _countof(args),
+        includeHandler.Get(), IID_PPV_ARGS(&result))))
+    {
+        OutputDebugStringW(L"[ShaderManager] library compile call failed\n");
+        return {};
+    }
+
+    ComPtr<IDxcBlobUtf8> errors;
+    result->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(&errors), nullptr);
+    if (errors && errors->GetStringLength() > 0)
+    {
+        OutputDebugStringA("[ShaderManager] library compile errors/warnings:\n");
+        OutputDebugStringA(errors->GetStringPointer());
+        OutputDebugStringA("\n");
+    }
+
+    HRESULT status;
+    result->GetStatus(&status);
+    if (FAILED(status))
+    {
+        OutputDebugStringW(L"[ShaderManager] library compile failed\n");
+        return {};
+    }
+
+    ComPtr<IDxcBlob> shaderBlob;
+    result->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&shaderBlob), nullptr);
+    if (!shaderBlob)
+        return {};
+
+    const char* p = static_cast<const char*>(shaderBlob->GetBufferPointer());
+    return std::vector<char>(p, p + shaderBlob->GetBufferSize());
+}

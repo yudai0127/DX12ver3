@@ -49,6 +49,14 @@ void Framework::Initialize()
 
     // シェーダーエディタを初期化（HLSLフォルダの.hlslを編集できる）
     m_shaderEditor.Initialize("HLSL", mr);
+
+    // Raytracing (DXR): build acceleration structures + pipeline from the
+    // scene. If the GPU/driver has no DXR support this quietly fails and the
+    // app keeps using the rasterizer.
+    if (m_raytracer.Initialize(m_scene.get(), m_config.width, m_config.height))
+    {
+        m_useRaytracing = true; // default to the ray-traced view when available
+    }
 }
 
 //-----------------------------------------------------------------------------
@@ -73,6 +81,16 @@ void Framework::Update(float elapsedTime)
     }
 
     // カメラ（ビュー・射影行列）を更新してシーン定数バッファに反映
+    // F6: toggle rasterizer / raytracing (only when DXR is available)
+    if (m_raytracer.IsValid())
+    {
+        static bool prevF6 = false;
+        bool nowF6 = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
+        if (nowF6 && !prevF6)
+            m_useRaytracing = !m_useRaytracing;
+        prevF6 = nowF6;
+    }
+
     const float aspect = DM()->GetScreenWidth() / DM()->GetScreenHeight();
     m_camera.Update(aspect);
 
@@ -91,6 +109,16 @@ void Framework::Render(float elapsedTime)
     ImGui::DragFloat3("Focus", &m_camera.focus.x, 0.1f);
     ImGui::DragFloat("FOV", &m_camera.fovDegree, 0.5f, 10.0f, 120.0f);
     ImGui::DragFloat3("Light", &m_camera.lightDir.x, 0.05f, -1.0f, 1.0f);
+    ImGui::Separator();
+    if (m_raytracer.IsValid())
+    {
+        ImGui::Checkbox("Use Raytracing (DXR) [F6]", &m_useRaytracing);
+        ImGui::Text("RT instances: %zu", m_raytracer.GetInstanceCount());
+    }
+    else
+    {
+        ImGui::TextDisabled("Raytracing (DXR): not available");
+    }
     ImGui::End();
 
     // シェーダーエディタ（アプリ内で編集→保存＆リロード）
@@ -127,7 +155,15 @@ void Framework::Render(float elapsedTime)
     const float clearColor[4] = { 0.2f, 0.2f, 0.2f, 1.0f };
     BeginFrame(clearColor);
 
-    m_scene->Render(GetCmdList());      // シーン内の全 GameObject を描画
+    if (m_useRaytracing && m_raytracer.IsValid())
+    {
+        // DXR: trace into an offscreen image and copy it into the back buffer.
+        m_raytracer.Render(m_camera);
+    }
+    else
+    {
+        m_scene->Render(GetCmdList());
+    }
     m_imgui.Render(GetCmdList());       // ImGui の描画
 
     EndFrame();
@@ -340,6 +376,9 @@ void Framework::Resize(uint32_t width, uint32_t height)
     m_config.height = height;
 
     DM()->Resize(width, height);
+
+    // Keep the ray-tracing output image in sync with the window size.
+    m_raytracer.Resize(width, height);
     m_frameFenceValues.assign(m_config.frameCount, 0);
 }
 

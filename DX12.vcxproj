@@ -50,6 +50,9 @@
     <ClInclude Include="SourceCode\RHI\GpuTimer.h" />
     <ClInclude Include="SourceCode\RHI\PipelineBuilder.h" />
     <ClInclude Include="SourceCode\RHI\RootSignatureBuilder.h" />
+    <ClInclude Include="SourceCode\RHI\RaytracingAccel.h" />
+    <ClInclude Include="SourceCode\RHI\RaytracingPipeline.h" />
+    <ClInclude Include="SourceCode\Graphics\RaytracingRenderer.h" />
     <ClInclude Include="SourceCode\RHI\SwapChain.h" />
     <ClInclude Include="Until\imgui\imconfig.h" />
     <ClInclude Include="Until\imgui\imgui.h" />
@@ -91,6 +94,9 @@
     <ClCompile Include="SourceCode\RHI\GpuTimer.cpp" />
     <ClCompile Include="SourceCode\RHI\PipelineBuilder.cpp" />
     <ClCompile Include="SourceCode\RHI\RootSignatureBuilder.cpp" />
+    <ClCompile Include="SourceCode\RHI\RaytracingAccel.cpp" />
+    <ClCompile Include="SourceCode\RHI\RaytracingPipeline.cpp" />
+    <ClCompile Include="SourceCode\Graphics\RaytracingRenderer.cpp" />
     <ClCompile Include="SourceCode\RHI\SwapChain.cpp">
       <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">.\SourceCode\Header;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Release|x64'">.\SourceCode\Header;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -108,6 +114,7 @@
     <None Include="HLSL\Mesh.hlsli" />
     <None Include="HLSL\PBR.hlsli" />
     <None Include="HLSL\Sprite.hlsli" />
+    <None Include="HLSL\PathTrace.hlsl" />
   </ItemGroup>
   <ItemGroup>
     <FxCompile Include="HLSL\GltfModel_PS.hlsl">
@@ -253,7 +260,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>.\SourceCode;.\Until\imgui;.\Until\DirectXTK12-main\Inc;.\Until\tinygltf-release;.\Until\ShaderCompiler\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>.\SourceCode;.\Until\imgui;.\Until\DirectXTK12-main\Inc;.\Until\DirectXTK12-main\Src;.\Until\tinygltf-release;.\Until\ShaderCompiler\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
     <Link>
@@ -275,7 +282,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>.\SourceCode;.\Until\imgui;.\Until\DirectXTK12-main\Inc;.\Until\tinygltf-release;.\Until\ShaderCompiler\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>.\SourceCode;.\Until\imgui;.\Until\DirectXTK12-main\Inc;.\Until\DirectXTK12-main\Src;.\Until\tinygltf-release;.\Until\ShaderCompiler\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
     <Link>

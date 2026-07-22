@@ -56,6 +56,10 @@ bool CommandContext::Initialize(ID3D12Device* device,
         return false;
     }
     m_commandList->SetName(L"MainCommandList");
+
+    // DXR: try to obtain the ID3D12GraphicsCommandList4 view (stays null on
+    // machines without DXR; the raytracing renderer checks for it).
+    m_commandList.As(&m_commandList4);
     m_commandList->Close(); // 生成直後はクローズ状態にする
 
     // ---- フェンス -------------------------------------------------------

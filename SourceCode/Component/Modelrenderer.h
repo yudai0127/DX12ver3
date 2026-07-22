@@ -42,6 +42,16 @@ public:
 
     void OnRender(ID3D12GraphicsCommandList* commandList) override;
 
+    // ---- Raytracing (DXR) access -------------------------------------
+    /// @brief Underlying glTF model (geometry source for BLAS building).
+    GltfModel* GetModel() const { return m_model.get(); }
+
+    /// @brief World matrix from the owning GameObject's Transform.
+    ///        Returns identity if the model/transform is unavailable.
+    DirectX::XMFLOAT4X4 GetWorldMatrix() const;
+
+    const DirectX::XMFLOAT4& GetColor() const { return m_color; }
+
 private:
     std::unique_ptr<GltfModel> m_model;
     DirectX::XMFLOAT4 m_color = { 1, 1, 1, 1 };

@@ -50,6 +50,14 @@ public:
     IDXGIFactory6* GetFactory() const { return m_factory.Get(); }
     IDXGIAdapter1* GetAdapter() const { return m_adapter.Get(); }
 
+    // ---- DXR (DirectX Raytracing) ------------------------------------
+    // ID3D12Device5 is required for BuildRaytracingAccelerationStructure,
+    // CreateStateObject, etc. Returns nullptr on devices without DXR.
+    ID3D12Device5* GetDevice5() const { return m_device5.Get(); }
+
+    // True when the adapter/driver reports RaytracingTier >= 1.0.
+    bool SupportsRaytracing() const { return m_raytracingSupported; }
+
     const AdapterInfo& GetAdapterInfo() const { return m_adapterInfo; }
 
     /// @brief MSAA サポートレベルを確認する
@@ -67,6 +75,8 @@ private:
     ComPtr<IDXGIFactory6>  m_factory;
     ComPtr<IDXGIAdapter1>  m_adapter;
     ComPtr<ID3D12Device>   m_device;
+    ComPtr<ID3D12Device5>  m_device5;            // DXR interface (may be null)
+    bool                   m_raytracingSupported = false;
 
     AdapterInfo m_adapterInfo;
 };

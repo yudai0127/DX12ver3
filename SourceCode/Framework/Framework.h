@@ -9,6 +9,7 @@
 #include "RHI/GpuTimer.h" 
 #include "Core/Scene.h"
 #include "Camera/Camera.h"
+#include "Graphics/RaytracingRenderer.h"
 #include <memory>
 
 //-----------------------------------------------------------------------------
@@ -75,6 +76,9 @@ private:
     std::unique_ptr<Scene> m_scene;
     class ModelRenderer* m_modelRenderer = nullptr; // ホットリロード対象（非所有）
     Camera         m_camera;
+
+    RaytracingRenderer m_raytracer;              // DXR path (optional)
+    bool               m_useRaytracing = false;  // toggle: raster vs raytracing
 
     std::vector<uint64_t> m_frameFenceValues;
     uint32_t              m_frameIndex = 0;

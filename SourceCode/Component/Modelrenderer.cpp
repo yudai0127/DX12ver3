@@ -18,3 +18,16 @@ void ModelRenderer::OnRender(ID3D12GraphicsCommandList* commandList)
     m_model->Render(commandList, world, m_color,
         s_camera->GetSceneCBAddress());
 }
+
+XMFLOAT4X4 ModelRenderer::GetWorldMatrix() const
+{
+    XMFLOAT4X4 world;
+    XMStoreFloat4x4(&world, XMMatrixIdentity());
+
+    if (GameObject* owner = GetOwner())
+    {
+        if (Transform* tf = owner->GetTransform())
+            XMStoreFloat4x4(&world, tf->GetWorldMatrix());
+    }
+    return world;
+}

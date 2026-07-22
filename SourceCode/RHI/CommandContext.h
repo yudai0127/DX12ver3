@@ -62,6 +62,10 @@ public:
     // アクセサ
     //-------------------------------------------------------------------
     ID3D12GraphicsCommandList* GetCommandList() const { return m_commandList.Get(); }
+
+    // DXR command list (DispatchRays / BuildRaytracingAccelerationStructure /
+    // SetPipelineState1). Returns nullptr if the OS/driver has no DXR support.
+    ID3D12GraphicsCommandList4* GetCommandList4() const { return m_commandList4.Get(); }
     ID3D12CommandQueue* GetQueue()       const { return m_queue.Get(); }
     Fence& GetFence() { return m_fence; }
     const Fence& GetFence()       const { return m_fence; }
@@ -89,6 +93,7 @@ private:
     ComPtr<ID3D12CommandQueue>              m_queue;
     std::vector<ComPtr<ID3D12CommandAllocator>> m_allocators; // フレーム数分
     ComPtr<ID3D12GraphicsCommandList>       m_commandList;
+    ComPtr<ID3D12GraphicsCommandList4>      m_commandList4; // DXR (may be null)
     Fence                                   m_fence;
 
     D3D12_COMMAND_LIST_TYPE m_type = D3D12_COMMAND_LIST_TYPE_DIRECT;

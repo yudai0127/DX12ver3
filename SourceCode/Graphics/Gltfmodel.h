@@ -118,6 +118,18 @@ public:
     const std::wstring& GetVSPath() const { return m_vsPath; }
     const std::wstring& GetPSPath() const { return m_psPath; }
 
+    //-------------------------------------------------------------------
+    // Raytracing (DXR) accessors
+    //   The acceleration-structure builder walks nodes -> mesh -> primitives
+    //   and reads each primitive's vertex/index buffer. Buffers are UPLOAD
+    //   heaps (GENERIC_READ), a valid state for AS build inputs.
+    //-------------------------------------------------------------------
+    const std::vector<Mesh>&         GetMeshes()    const { return m_meshes; }
+    const std::vector<Node>&         GetNodes()     const { return m_nodes; }
+    const std::vector<MaterialData>& GetMaterials() const { return m_materials; }
+
+    static UINT VertexStride() { return sizeof(Vertex); }
+
 private:
     bool CreateRootSignature(ID3D12Device* device);
     bool CreatePipelineState(ID3D12Device* device, DXGI_FORMAT rtvFormat);

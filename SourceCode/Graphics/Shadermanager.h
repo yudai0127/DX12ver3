@@ -33,6 +33,14 @@ public:
         const wchar_t* entryPoint,
         const wchar_t* target);
 
+    /// @brief Compile a DXR shader library (target "lib_6_3", no entry point).
+    ///        Returns the DXIL library blob used to build an RT state object.
+    ///        Empty vector on failure.
+    /// @param hlslPath  path to the .hlsl containing [shader("...")] functions
+    /// @param target    library target ("lib_6_3" by default)
+    std::vector<char> CompileLibrary(const wchar_t* hlslPath,
+        const wchar_t* target = L"lib_6_3");
+
 private:
     ShaderManager() = default;
     ~ShaderManager() = default;

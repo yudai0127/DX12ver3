@@ -152,6 +152,22 @@ bool Device::CreateDevice()
                 (UINT)fl >> 12, ((UINT)fl >> 8) & 0xF,
                 m_adapterInfo.description.c_str());
             OutputDebugStringW(buf);
+
+            // ---- DXR support check ------------------------------------
+            // Query ID3D12Device5 and read RaytracingTier from OPTIONS5.
+            if (SUCCEEDED(m_device.As(&m_device5)))
+            {
+                D3D12_FEATURE_DATA_D3D12_OPTIONS5 opt5 = {};
+                if (SUCCEEDED(m_device5->CheckFeatureSupport(
+                    D3D12_FEATURE_D3D12_OPTIONS5, &opt5, sizeof(opt5))))
+                {
+                    m_raytracingSupported =
+                        (opt5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_0);
+                }
+            }
+            OutputDebugStringW(m_raytracingSupported
+                ? L"[DX12] DXR (Raytracing Tier 1.0+) : supported\n"
+                : L"[DX12] DXR (Raytracing)           : NOT supported\n");
             return true;
         }
     }
