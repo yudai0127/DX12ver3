@@ -117,12 +117,13 @@ bool RaytracingPipeline::CreateLocalRootSignature(ID3D12Device5* device)
     params[1].Descriptor.ShaderRegister = 2; // t2
     params[1].Descriptor.RegisterSpace = 0;
     params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    // param2: base color (4 floats) + base-color texture index (1 int) as
-    //         5 root constants (b1)
+    // param2: PBR material constants (b1), 10x 32-bit values:
+    //   baseColor(4) + baseColorTex(1) + metallic(1) + roughness(1)
+    //   + mrTex(1) + normalTex(1) + normalScale(1)
     params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     params[2].Constants.ShaderRegister = 1; // b1
     params[2].Constants.RegisterSpace = 0;
-    params[2].Constants.Num32BitValues = 5;
+    params[2].Constants.Num32BitValues = 10;
     params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     D3D12_ROOT_SIGNATURE_DESC desc = {};

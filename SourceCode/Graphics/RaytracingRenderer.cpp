@@ -156,11 +156,15 @@ bool RaytracingRenderer::BuildAccelerationStructures(Scene* scene)
                 {
                     const auto& mat = materials[prim.material];
                     hd.baseColor = mat.basecolor_factor;
-                    // basecolor_texture indexes this model's textures; offset it
-                    // into the shared bindless array.
-                    hd.baseColorTex = (mat.basecolor_texture >= 0)
-                        ? texBase + mat.basecolor_texture
-                        : -1;
+                    hd.metallic = mat.metallic_factor;
+                    hd.roughness = mat.roughness_factor;
+                    hd.normalScale = mat.normal_scale;
+                    // Texture indices reference this model's textures; offset
+                    // them into the shared bindless array (-1 stays -1).
+                    auto remap = [texBase](int idx) { return idx >= 0 ? texBase + idx : -1; };
+                    hd.baseColorTex = remap(mat.basecolor_texture);
+                    hd.mrTex        = remap(mat.metallic_roughness_texture);
+                    hd.normalTex    = remap(mat.normal_texture);
                 }
                 m_hitData.push_back(hd);
 
@@ -213,8 +217,10 @@ bool RaytracingRenderer::BuildShaderTable()
 
     const UINT raygenStride = (UINT)Align(kShaderIdSize, kRecordAlign);          // 32
     m_missStride = (UINT)Align(kShaderIdSize, kRecordAlign);                     // 32
-    // hit record: shaderId + vbVA(8) + ibVA(8) + baseColor(16) + texIndex(4)
-    m_hitStride  = (UINT)Align(kShaderIdSize + 8 + 8 + 16 + 4, kRecordAlign);    // 96
+    // hit record: shaderId + vbVA(8) + ibVA(8) + b1 constants(40)
+    //   b1 = baseColor(16) + texIdx(4) + metallic(4) + roughness(4)
+    //        + mrTex(4) + normalTex(4) + normalScale(4)
+    m_hitStride  = (UINT)Align(kShaderIdSize + 8 + 8 + 40, kRecordAlign);        // 96
 
     m_raygenRegionSize = raygenStride;
     m_missRegionSize   = numMiss * m_missStride;
@@ -250,8 +256,15 @@ bool RaytracingRenderer::BuildShaderTable()
         uint8_t* args = rec + kShaderIdSize;
         memcpy(args + 0,  &m_hitData[i].vbAddress, sizeof(D3D12_GPU_VIRTUAL_ADDRESS));
         memcpy(args + 8,  &m_hitData[i].ibAddress, sizeof(D3D12_GPU_VIRTUAL_ADDRESS));
-        memcpy(args + 16, &m_hitData[i].baseColor, sizeof(XMFLOAT4));
-        memcpy(args + 32, &m_hitData[i].baseColorTex, sizeof(int)); // b1: texture index
+        // b1 constants (must match HitCB layout in PathTrace.hlsl)
+        uint8_t* cb = args + 16;
+        memcpy(cb + 0,  &m_hitData[i].baseColor,    sizeof(XMFLOAT4)); // 16
+        memcpy(cb + 16, &m_hitData[i].baseColorTex, sizeof(int));      // 4
+        memcpy(cb + 20, &m_hitData[i].metallic,     sizeof(float));    // 4
+        memcpy(cb + 24, &m_hitData[i].roughness,    sizeof(float));    // 4
+        memcpy(cb + 28, &m_hitData[i].mrTex,        sizeof(int));      // 4
+        memcpy(cb + 32, &m_hitData[i].normalTex,    sizeof(int));      // 4
+        memcpy(cb + 36, &m_hitData[i].normalScale,  sizeof(float));    // 4
     }
     return true;
 }

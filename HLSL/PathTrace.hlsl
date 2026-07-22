@@ -1,11 +1,12 @@
 //=============================================================================
-// PathTrace.hlsl  (DXR milestone 1 + base-color textures)
-//   Primary rays through the camera + hard shadows from the directional light,
-//   with the glTF base-color texture sampled at the hit point.
+// PathTrace.hlsl  (DXR: PBR direct lighting + textures + hard shadows)
+//   Primary rays through the camera, shaded with the same metallic-roughness
+//   PBR BRDF as the rasterizer (PBR.hlsli), plus a traced hard shadow ray.
 //
 //   Exports (must match RaytracingPipeline export names):
 //     RayGen / Miss / ShadowMiss / ClosestHit  (hit group "HitGroup")
 //=============================================================================
+#include "PBR.hlsli"   // PBR_DirectLight (GGX specular, Fresnel, metallic)
 
 // Vertex layout must match GltfModel::Vertex (48 bytes, tightly packed).
 struct Vertex
@@ -30,7 +31,7 @@ cbuffer SceneCB : register(b0)
     uint4  frame;
 };
 
-// Bindless base-color textures (one per glTF texture, all models concatenated).
+// Bindless textures (one per glTF texture, all models concatenated).
 Texture2D    gTextures[] : register(t3);
 SamplerState gSampler    : register(s0);
 
@@ -40,7 +41,12 @@ StructuredBuffer<uint>   gIndices  : register(t2);
 cbuffer HitCB : register(b1)
 {
     float4 gBaseColor;    // basecolor_factor
-    int    gBaseColorTex; // index into gTextures[], or -1 if none
+    int    gBaseColorTex; // index into gTextures[], or -1
+    float  gMetallic;     // metallic_factor
+    float  gRoughness;    // roughness_factor
+    int    gMRTex;        // metallic-roughness texture (G=rough, B=metal), or -1
+    int    gNormalTex;    // normal map, or -1
+    float  gNormalScale;  // normal map strength
 };
 
 //---- ray payloads -----------------------------------------------------------
@@ -85,11 +91,7 @@ void RayGen()
     payload.color = float3(0, 0, 0);
     payload.hitT = -1.0f;
 
-    TraceRay(gScene, RAY_FLAG_NONE, 0xFF,
-             /*RayContributionToHitGroupIndex*/ 0,
-             /*MultiplierForGeometryContributionToHitGroupIndex*/ 0,
-             /*MissShaderIndex*/ 0,
-             ray, payload);
+    TraceRay(gScene, RAY_FLAG_NONE, 0xFF, 0, 0, /*MissShaderIndex*/ 0, ray, payload);
 
     gOutput[pix] = float4(payload.color, 1.0f);
 }
@@ -100,9 +102,8 @@ void RayGen()
 [shader("miss")]
 void Miss(inout Payload payload)
 {
-    float t = 0.5f;
     payload.color = lerp(float3(0.02f, 0.02f, 0.04f),
-                         float3(0.35f, 0.55f, 0.85f), t);
+                         float3(0.35f, 0.55f, 0.85f), 0.5f);
     payload.hitT = -1.0f;
 }
 
@@ -115,9 +116,25 @@ void ShadowMiss(inout ShadowPayload s)
     s.visible = 1.0f;
 }
 
+// Trace a shadow ray toward the light; returns 1 if lit, 0 if occluded.
+float TraceShadow(float3 origin, float3 L)
+{
+    RayDesc sray;
+    sray.Origin = origin;
+    sray.Direction = L;
+    sray.TMin = 1e-3f;
+    sray.TMax = 1e5f;
+
+    ShadowPayload sp;
+    sp.visible = 0.0f; // assume occluded; ShadowMiss flips it to 1
+    TraceRay(gScene,
+             RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
+             0xFF, 0, 0, /*MissShaderIndex*/ 1, sray, sp);
+    return sp.visible;
+}
+
 //-----------------------------------------------------------------------------
-// Closest hit: interpolate normal + uv, sample the base-color texture, apply a
-// directional light with a traced shadow ray, and add ambient.
+// Closest hit: PBR shading with the directional light + traced shadow.
 //-----------------------------------------------------------------------------
 [shader("closesthit")]
 void ClosestHit(inout Payload payload,
@@ -135,43 +152,55 @@ void ClosestHit(inout Payload payload,
     float3 bc = float3(1.0f - attr.barycentrics.x - attr.barycentrics.y,
                        attr.barycentrics.x, attr.barycentrics.y);
 
+    // Interpolated attributes.
     float3 nObj = normalize(v0.normal * bc.x + v1.normal * bc.y + v2.normal * bc.z);
-    float3 nWorld = normalize(mul((float3x3)ObjectToWorld3x4(), nObj));
+    float2 uv   = v0.texcoord * bc.x + v1.texcoord * bc.y + v2.texcoord * bc.z;
+    float4 tang = v0.tangent  * bc.x + v1.tangent  * bc.y + v2.tangent  * bc.z;
 
-    float2 uv = v0.texcoord * bc.x + v1.texcoord * bc.y + v2.texcoord * bc.z;
+    float3x3 obj2world = (float3x3)ObjectToWorld3x4();
+    float3 Ngeom = normalize(mul(obj2world, nObj));
+    float3 N = Ngeom;
 
-    float3 hitPos = WorldRayOrigin() + RayTCurrent() * WorldRayDirection();
+    // Normal mapping (tangent space -> world) when a normal map is present.
+    if (gNormalTex >= 0)
+    {
+        float3 T = normalize(mul(obj2world, tang.xyz));
+        T = normalize(T - dot(T, Ngeom) * Ngeom);   // Gram-Schmidt
+        float3 B = cross(Ngeom, T) * tang.w;        // tangent.w = handedness
+        float3 nT = gTextures[gNormalTex].SampleLevel(gSampler, uv, 0).xyz * 2.0f - 1.0f;
+        nT.xy *= gNormalScale;
+        N = normalize(nT.x * T + nT.y * B + nT.z * Ngeom);
+    }
 
-    // Base color: factor, optionally modulated by the base-color texture.
-    // Ray tracing has no automatic derivatives, so sample an explicit LOD 0.
+    // Base color (factor * texture).
     float4 base = gBaseColor;
     if (gBaseColorTex >= 0)
         base *= gTextures[gBaseColorTex].SampleLevel(gSampler, uv, 0);
 
-    // Directional light: lightDir is the travel direction, so L points back to it.
-    float3 L = normalize(-lightDir.xyz);
-    float ndotl = saturate(dot(nWorld, L));
-
-    float shadow = 1.0f;
-    if (ndotl > 0.0f)
+    // Metallic / roughness (factor * texture; glTF: G=rough, B=metal).
+    float metallic = gMetallic;
+    float roughness = gRoughness;
+    if (gMRTex >= 0)
     {
-        RayDesc sray;
-        sray.Origin = hitPos + nWorld * 1e-2f; // offset to avoid self-hit
-        sray.Direction = L;
-        sray.TMin = 1e-3f;
-        sray.TMax = 1e5f;
-
-        ShadowPayload sp;
-        sp.visible = 0.0f; // assume occluded; ShadowMiss flips it to 1
-        TraceRay(gScene,
-                 RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
-                 0xFF, 0, 0, /*MissShaderIndex*/ 1, sray, sp);
-        shadow = sp.visible;
+        float4 mr = gTextures[gMRTex].SampleLevel(gSampler, uv, 0);
+        roughness *= mr.g;
+        metallic *= mr.b;
     }
+    roughness = clamp(roughness, 0.04f, 1.0f);
 
-    float3 lit = base.rgb * lightColor.rgb * (ndotl * shadow);
-    float3 amb = base.rgb * ambient.rgb;
+    float3 hitPos = WorldRayOrigin() + RayTCurrent() * WorldRayDirection();
+    float3 V = normalize(-WorldRayDirection());   // toward the camera
+    float3 L = normalize(-lightDir.xyz);          // toward the light
 
-    payload.color = lit + amb;
+    // Hard shadow (offset along the geometric normal to avoid self-hit).
+    float ndotl = saturate(dot(N, L));
+    float shadow = (ndotl > 0.0f) ? TraceShadow(hitPos + Ngeom * 1e-2f, L) : 1.0f;
+
+    // PBR direct lighting (shared with the rasterizer) + simple ambient.
+    float3 direct = PBR_DirectLight(N, V, L, base.rgb, metallic, roughness,
+                                    lightColor.rgb) * shadow;
+    float3 amb = base.rgb * ambient.rgb * (1.0f - metallic);
+
+    payload.color = direct + amb;
     payload.hitT = RayTCurrent();
 }
