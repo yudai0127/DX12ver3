@@ -1,0 +1,1726 @@
+From b914bfa25e678e6cb0997bb981c64be78b488005 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 22 Jul 2026 01:02:35 +0000
+Subject: [PATCH] Add DXR hardware ray tracing (foundation + shadows)
+
+Add a hardware DirectX Raytracing path alongside the existing rasterizer.
+Milestone 1: primary rays through the camera + hard directional shadows on
+the existing glTF model, toggled at runtime (F6 / ImGui checkbox).
+
+RHI:
+- Device: expose ID3D12Device5 and a RaytracingTier support check.
+- CommandContext: expose ID3D12GraphicsCommandList4.
+- RaytracingAccel: BLAS/TLAS builder helpers.
+- RaytracingPipeline: DXR state object + global/local root signatures.
+
+Graphics:
+- RaytracingRenderer: collects scene geometry, builds acceleration
+  structures + shader binding table, dispatches rays into a UAV image and
+  copies it to the back buffer.
+- ShaderManager: add CompileLibrary() for lib_6_3 DXR shaders.
+- GltfModel / ModelRenderer: expose geometry + world matrix for BLAS.
+
+Shader:
+- HLSL/PathTrace.hlsl: raygen / miss / shadow-miss / closest-hit.
+
+Project:
+- Register new files, add d3dx12.h (DirectXTK Src) to the include path.
+
+Runs only when the GPU/driver reports DXR support; otherwise the app
+transparently keeps using the rasterizer.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01SfcRdgEzpuV52YCuhdR5ty
+---
+ DX12.vcxproj                               |  11 +-
+ DX12.vcxproj.filters                       |   7 +
+ HLSL/PathTrace.hlsl                        | 163 +++++++++
+ SourceCode/Component/Modelrenderer.cpp     |  13 +
+ SourceCode/Component/Modelrenderer.h       |  10 +
+ SourceCode/Framework/Framework.cpp         |  41 ++-
+ SourceCode/Framework/Framework.h           |   4 +
+ SourceCode/Graphics/Gltfmodel.h            |  12 +
+ SourceCode/Graphics/RaytracingRenderer.cpp | 373 +++++++++++++++++++++
+ SourceCode/Graphics/RaytracingRenderer.h   | 114 +++++++
+ SourceCode/Graphics/Shadermanager.cpp      |  81 +++++
+ SourceCode/Graphics/Shadermanager.h        |   8 +
+ SourceCode/RHI/CommandContext.cpp          |   4 +
+ SourceCode/RHI/CommandContext.h            |   5 +
+ SourceCode/RHI/Device.cpp                  |  16 +
+ SourceCode/RHI/Device.h                    |  10 +
+ SourceCode/RHI/RaytracingAccel.cpp         | 192 +++++++++++
+ SourceCode/RHI/RaytracingAccel.h           |  68 ++++
+ SourceCode/RHI/RaytracingPipeline.cpp      | 192 +++++++++++
+ SourceCode/RHI/RaytracingPipeline.h        |  59 ++++
+ 20 files changed, 1380 insertions(+), 3 deletions(-)
+ create mode 100644 HLSL/PathTrace.hlsl
+ create mode 100644 SourceCode/Graphics/RaytracingRenderer.cpp
+ create mode 100644 SourceCode/Graphics/RaytracingRenderer.h
+ create mode 100644 SourceCode/RHI/RaytracingAccel.cpp
+ create mode 100644 SourceCode/RHI/RaytracingAccel.h
+ create mode 100644 SourceCode/RHI/RaytracingPipeline.cpp
+ create mode 100644 SourceCode/RHI/RaytracingPipeline.h
+
+diff --git a/DX12.vcxproj b/DX12.vcxproj
+index d8a3b57..e5d66df 100644
+--- a/DX12.vcxproj
++++ b/DX12.vcxproj
+@@ -50,6 +50,9 @@
+     <ClInclude Include="SourceCode\RHI\GpuTimer.h" />
+     <ClInclude Include="SourceCode\RHI\PipelineBuilder.h" />
+     <ClInclude Include="SourceCode\RHI\RootSignatureBuilder.h" />
++    <ClInclude Include="SourceCode\RHI\RaytracingAccel.h" />
++    <ClInclude Include="SourceCode\RHI\RaytracingPipeline.h" />
++    <ClInclude Include="SourceCode\Graphics\RaytracingRenderer.h" />
+     <ClInclude Include="SourceCode\RHI\SwapChain.h" />
+     <ClInclude Include="Until\imgui\imconfig.h" />
+     <ClInclude Include="Until\imgui\imgui.h" />
+@@ -91,6 +94,9 @@
+     <ClCompile Include="SourceCode\RHI\GpuTimer.cpp" />
+     <ClCompile Include="SourceCode\RHI\PipelineBuilder.cpp" />
+     <ClCompile Include="SourceCode\RHI\RootSignatureBuilder.cpp" />
++    <ClCompile Include="SourceCode\RHI\RaytracingAccel.cpp" />
++    <ClCompile Include="SourceCode\RHI\RaytracingPipeline.cpp" />
++    <ClCompile Include="SourceCode\Graphics\RaytracingRenderer.cpp" />
+     <ClCompile Include="SourceCode\RHI\SwapChain.cpp">
+       <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">.\SourceCode\Header;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+       <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Release|x64'">.\SourceCode\Header;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+@@ -108,6 +114,7 @@
+     <None Include="HLSL\Mesh.hlsli" />
+     <None Include="HLSL\PBR.hlsli" />
+     <None Include="HLSL\Sprite.hlsli" />
++    <None Include="HLSL\PathTrace.hlsl" />
+   </ItemGroup>
+   <ItemGroup>
+     <FxCompile Include="HLSL\GltfModel_PS.hlsl">
+@@ -253,7 +260,7 @@
+       <SDLCheck>true</SDLCheck>
+       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+       <ConformanceMode>true</ConformanceMode>
+-      <AdditionalIncludeDirectories>.\SourceCode;.\Until\imgui;.\Until\DirectXTK12-main\Inc;.\Until\tinygltf-release;.\Until\ShaderCompiler\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
++      <AdditionalIncludeDirectories>.\SourceCode;.\Until\imgui;.\Until\DirectXTK12-main\Inc;.\Until\DirectXTK12-main\Src;.\Until\tinygltf-release;.\Until\ShaderCompiler\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+       <LanguageStandard>stdcpp17</LanguageStandard>
+     </ClCompile>
+     <Link>
+@@ -275,7 +282,7 @@
+       <SDLCheck>true</SDLCheck>
+       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+       <ConformanceMode>true</ConformanceMode>
+-      <AdditionalIncludeDirectories>.\SourceCode;.\Until\imgui;.\Until\DirectXTK12-main\Inc;.\Until\tinygltf-release;.\Until\ShaderCompiler\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
++      <AdditionalIncludeDirectories>.\SourceCode;.\Until\imgui;.\Until\DirectXTK12-main\Inc;.\Until\DirectXTK12-main\Src;.\Until\tinygltf-release;.\Until\ShaderCompiler\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+       <LanguageStandard>stdcpp17</LanguageStandard>
+     </ClCompile>
+     <Link>
+diff --git a/DX12.vcxproj.filters b/DX12.vcxproj.filters
+index 16b479b..8b2dfb5 100644
+--- a/DX12.vcxproj.filters
++++ b/DX12.vcxproj.filters
+@@ -38,6 +38,9 @@
+     <ClInclude Include="SourceCode\RHI\PipelineBuilder.h" />
+     <ClInclude Include="SourceCode\RHI\GpuBuffer.h" />
+     <ClInclude Include="SourceCode\RHI\RootSignatureBuilder.h" />
++    <ClInclude Include="SourceCode\RHI\RaytracingAccel.h" />
++    <ClInclude Include="SourceCode\RHI\RaytracingPipeline.h" />
++    <ClInclude Include="SourceCode\Graphics\RaytracingRenderer.h" />
+     <ClInclude Include="SourceCode\Core\FrameTimer.h" />
+     <ClInclude Include="SourceCode\RHI\GpuTimer.h" />
+     <ClInclude Include="SourceCode\Core\RenderStats.h" />
+@@ -79,6 +82,9 @@
+     <ClCompile Include="SourceCode\RHI\PipelineBuilder.cpp" />
+     <ClCompile Include="SourceCode\RHI\GpuBuffer.cpp" />
+     <ClCompile Include="SourceCode\RHI\RootSignatureBuilder.cpp" />
++    <ClCompile Include="SourceCode\RHI\RaytracingAccel.cpp" />
++    <ClCompile Include="SourceCode\RHI\RaytracingPipeline.cpp" />
++    <ClCompile Include="SourceCode\Graphics\RaytracingRenderer.cpp" />
+     <ClCompile Include="SourceCode\Core\FrameTimer.cpp" />
+     <ClCompile Include="SourceCode\RHI\GpuTimer.cpp" />
+   </ItemGroup>
+@@ -87,6 +93,7 @@
+     <None Include="HLSL\Mesh.hlsli" />
+     <None Include="HLSL\GltfModel.hlsli" />
+     <None Include="HLSL\PBR.hlsli" />
++    <None Include="HLSL\PathTrace.hlsl" />
+   </ItemGroup>
+   <ItemGroup>
+     <FxCompile Include="HLSL\Sprite_PS.hlsl" />
+diff --git a/HLSL/PathTrace.hlsl b/HLSL/PathTrace.hlsl
+new file mode 100644
+index 0000000..2852df2
+--- /dev/null
++++ b/HLSL/PathTrace.hlsl
+@@ -0,0 +1,163 @@
++//=============================================================================
++// PathTrace.hlsl  (DXR milestone 1)
++//   Primary rays through the camera + hard shadows from the directional light,
++//   traced against the scene TLAS. This is the foundation the path tracer
++//   (multi-bounce, accumulation) will build on.
++//
++//   Exports (must match RaytracingPipeline export names):
++//     RayGen / Miss / ShadowMiss / ClosestHit  (hit group "HitGroup")
++//=============================================================================
++
++// Vertex layout must match GltfModel::Vertex (48 bytes, tightly packed).
++struct Vertex
++{
++    float3 position;
++    float3 normal;
++    float4 tangent;
++    float2 texcoord;
++};
++
++//---- global root signature ---------------------------------------------------
++RaytracingAccelerationStructure gScene  : register(t0);
++RWTexture2D<float4>             gOutput : register(u0);
++
++cbuffer SceneCB : register(b0)
++{
++    row_major float4x4 invViewProj; // clip -> world (row-vector convention)
++    float4 cameraPos;
++    float4 lightDir;    // direction the light travels toward (app-provided)
++    float4 lightColor;
++    float4 ambient;
++    uint4  frame;
++};
++
++//---- local root signature (per hit record) ----------------------------------
++StructuredBuffer<Vertex> gVertices : register(t1);
++StructuredBuffer<uint>   gIndices  : register(t2);
++cbuffer HitCB : register(b1) { float4 gBaseColor; }
++
++//---- ray payloads -----------------------------------------------------------
++struct Payload
++{
++    float3 color;
++    float  hitT;
++};
++
++struct ShadowPayload
++{
++    float visible; // 1 = lit, 0 = occluded
++};
++
++//-----------------------------------------------------------------------------
++// Ray generation: one primary ray per pixel.
++//-----------------------------------------------------------------------------
++[shader("raygeneration")]
++void RayGen()
++{
++    uint2 pix = DispatchRaysIndex().xy;
++    uint2 dim = DispatchRaysDimensions().xy;
++
++    // Pixel center -> NDC. (DX NDC: x right, y up, z in [0,1].)
++    float2 uv = (float2(pix) + 0.5f) / float2(dim);
++    float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
++
++    // Unproject a far-plane point (z = 1) to get the ray direction.
++    float4 farW = mul(float4(ndc, 1.0f, 1.0f), invViewProj);
++    farW /= farW.w;
++
++    float3 origin = cameraPos.xyz;
++    float3 dir = normalize(farW.xyz - origin);
++
++    RayDesc ray;
++    ray.Origin = origin;
++    ray.Direction = dir;
++    ray.TMin = 1e-3f;
++    ray.TMax = 1e5f;
++
++    Payload payload;
++    payload.color = float3(0, 0, 0);
++    payload.hitT = -1.0f;
++
++    TraceRay(gScene, RAY_FLAG_NONE, 0xFF,
++             /*RayContributionToHitGroupIndex*/ 0,
++             /*MultiplierForGeometryContributionToHitGroupIndex*/ 0,
++             /*MissShaderIndex*/ 0,
++             ray, payload);
++
++    gOutput[pix] = float4(payload.color, 1.0f);
++}
++
++//-----------------------------------------------------------------------------
++// Primary miss: simple sky.
++//-----------------------------------------------------------------------------
++[shader("miss")]
++void Miss(inout Payload payload)
++{
++    float t = 0.5f;
++    payload.color = lerp(float3(0.02f, 0.02f, 0.04f),
++                         float3(0.35f, 0.55f, 0.85f), t);
++    payload.hitT = -1.0f;
++}
++
++//-----------------------------------------------------------------------------
++// Shadow miss: the shadow ray reached the light unobstructed.
++//-----------------------------------------------------------------------------
++[shader("miss")]
++void ShadowMiss(inout ShadowPayload s)
++{
++    s.visible = 1.0f;
++}
++
++//-----------------------------------------------------------------------------
++// Closest hit: interpolate the normal, apply a directional light with a
++// traced shadow ray, and add ambient.
++//-----------------------------------------------------------------------------
++[shader("closesthit")]
++void ClosestHit(inout Payload payload,
++                in BuiltInTriangleIntersectionAttributes attr)
++{
++    uint prim = PrimitiveIndex();
++    uint i0 = gIndices[prim * 3 + 0];
++    uint i1 = gIndices[prim * 3 + 1];
++    uint i2 = gIndices[prim * 3 + 2];
++
++    Vertex v0 = gVertices[i0];
++    Vertex v1 = gVertices[i1];
++    Vertex v2 = gVertices[i2];
++
++    float3 bc = float3(1.0f - attr.barycentrics.x - attr.barycentrics.y,
++                       attr.barycentrics.x, attr.barycentrics.y);
++
++    float3 nObj = normalize(v0.normal * bc.x + v1.normal * bc.y + v2.normal * bc.z);
++    float3 nWorld = normalize(mul((float3x3)ObjectToWorld3x4(), nObj));
++
++    float3 hitPos = WorldRayOrigin() + RayTCurrent() * WorldRayDirection();
++
++    // Directional light: lightDir is the travel direction, so L points back to it.
++    float3 L = normalize(-lightDir.xyz);
++    float ndotl = saturate(dot(nWorld, L));
++
++    float shadow = 1.0f;
++    if (ndotl > 0.0f)
++    {
++        RayDesc sray;
++        sray.Origin = hitPos + nWorld * 1e-2f; // offset to avoid self-hit
++        sray.Direction = L;
++        sray.TMin = 1e-3f;
++        sray.TMax = 1e5f;
++
++        ShadowPayload sp;
++        sp.visible = 0.0f; // assume occluded; ShadowMiss flips it to 1
++        TraceRay(gScene,
++                 RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
++                 0xFF, 0, 0, /*MissShaderIndex*/ 1, sray, sp);
++        shadow = sp.visible;
++    }
++
++    float3 base = gBaseColor.rgb;
++    float3 lit = base * lightColor.rgb * (ndotl * shadow);
++    float3 amb = base * ambient.rgb;
++
++    payload.color = lit + amb;
++    payload.hitT = RayTCurrent();
++}
+diff --git a/SourceCode/Component/Modelrenderer.cpp b/SourceCode/Component/Modelrenderer.cpp
+index e2f314d..e3efb63 100644
+--- a/SourceCode/Component/Modelrenderer.cpp
++++ b/SourceCode/Component/Modelrenderer.cpp
+@@ -17,4 +17,17 @@ void ModelRenderer::OnRender(ID3D12GraphicsCommandList* commandList)
+ 
+     m_model->Render(commandList, world, m_color,
+         s_camera->GetSceneCBAddress());
++}
++
++XMFLOAT4X4 ModelRenderer::GetWorldMatrix() const
++{
++    XMFLOAT4X4 world;
++    XMStoreFloat4x4(&world, XMMatrixIdentity());
++
++    if (GameObject* owner = GetOwner())
++    {
++        if (Transform* tf = owner->GetTransform())
++            XMStoreFloat4x4(&world, tf->GetWorldMatrix());
++    }
++    return world;
+ }
+\ No newline at end of file
+diff --git a/SourceCode/Component/Modelrenderer.h b/SourceCode/Component/Modelrenderer.h
+index 39d2784..18a414b 100644
+--- a/SourceCode/Component/Modelrenderer.h
++++ b/SourceCode/Component/Modelrenderer.h
+@@ -42,6 +42,16 @@ public:
+ 
+     void OnRender(ID3D12GraphicsCommandList* commandList) override;
+ 
++    // ---- Raytracing (DXR) access -------------------------------------
++    /// @brief Underlying glTF model (geometry source for BLAS building).
++    GltfModel* GetModel() const { return m_model.get(); }
++
++    /// @brief World matrix from the owning GameObject's Transform.
++    ///        Returns identity if the model/transform is unavailable.
++    DirectX::XMFLOAT4X4 GetWorldMatrix() const;
++
++    const DirectX::XMFLOAT4& GetColor() const { return m_color; }
++
+ private:
+     std::unique_ptr<GltfModel> m_model;
+     DirectX::XMFLOAT4 m_color = { 1, 1, 1, 1 };
+diff --git a/SourceCode/Framework/Framework.cpp b/SourceCode/Framework/Framework.cpp
+index 46c9b6c..3a89e71 100644
+--- a/SourceCode/Framework/Framework.cpp
++++ b/SourceCode/Framework/Framework.cpp
+@@ -49,6 +49,14 @@ void Framework::Initialize()
+ 
+     // シェーダーエディタを初期化（HLSLフォルダの.hlslを編集できる）
+     m_shaderEditor.Initialize("HLSL", mr);
++
++    // Raytracing (DXR): build acceleration structures + pipeline from the
++    // scene. If the GPU/driver has no DXR support this quietly fails and the
++    // app keeps using the rasterizer.
++    if (m_raytracer.Initialize(m_scene.get(), m_config.width, m_config.height))
++    {
++        m_useRaytracing = true; // default to the ray-traced view when available
++    }
+ }
+ 
+ //-----------------------------------------------------------------------------
+@@ -73,6 +81,16 @@ void Framework::Update(float elapsedTime)
+     }
+ 
+     // カメラ（ビュー・射影行列）を更新してシーン定数バッファに反映
++    // F6: toggle rasterizer / raytracing (only when DXR is available)
++    if (m_raytracer.IsValid())
++    {
++        static bool prevF6 = false;
++        bool nowF6 = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
++        if (nowF6 && !prevF6)
++            m_useRaytracing = !m_useRaytracing;
++        prevF6 = nowF6;
++    }
++
+     const float aspect = DM()->GetScreenWidth() / DM()->GetScreenHeight();
+     m_camera.Update(aspect);
+ 
+@@ -91,6 +109,16 @@ void Framework::Render(float elapsedTime)
+     ImGui::DragFloat3("Focus", &m_camera.focus.x, 0.1f);
+     ImGui::DragFloat("FOV", &m_camera.fovDegree, 0.5f, 10.0f, 120.0f);
+     ImGui::DragFloat3("Light", &m_camera.lightDir.x, 0.05f, -1.0f, 1.0f);
++    ImGui::Separator();
++    if (m_raytracer.IsValid())
++    {
++        ImGui::Checkbox("Use Raytracing (DXR) [F6]", &m_useRaytracing);
++        ImGui::Text("RT instances: %zu", m_raytracer.GetInstanceCount());
++    }
++    else
++    {
++        ImGui::TextDisabled("Raytracing (DXR): not available");
++    }
+     ImGui::End();
+ 
+     // シェーダーエディタ（アプリ内で編集→保存＆リロード）
+@@ -127,7 +155,15 @@ void Framework::Render(float elapsedTime)
+     const float clearColor[4] = { 0.2f, 0.2f, 0.2f, 1.0f };
+     BeginFrame(clearColor);
+ 
+-    m_scene->Render(GetCmdList());      // シーン内の全 GameObject を描画
++    if (m_useRaytracing && m_raytracer.IsValid())
++    {
++        // DXR: trace into an offscreen image and copy it into the back buffer.
++        m_raytracer.Render(m_camera);
++    }
++    else
++    {
++        m_scene->Render(GetCmdList());
++    }
+     m_imgui.Render(GetCmdList());       // ImGui の描画
+ 
+     EndFrame();
+@@ -340,6 +376,9 @@ void Framework::Resize(uint32_t width, uint32_t height)
+     m_config.height = height;
+ 
+     DM()->Resize(width, height);
++
++    // Keep the ray-tracing output image in sync with the window size.
++    m_raytracer.Resize(width, height);
+     m_frameFenceValues.assign(m_config.frameCount, 0);
+ }
+ 
+diff --git a/SourceCode/Framework/Framework.h b/SourceCode/Framework/Framework.h
+index 5cac027..e4736a0 100644
+--- a/SourceCode/Framework/Framework.h
++++ b/SourceCode/Framework/Framework.h
+@@ -9,6 +9,7 @@
+ #include "RHI/GpuTimer.h" 
+ #include "Core/Scene.h"
+ #include "Camera/Camera.h"
++#include "Graphics/RaytracingRenderer.h"
+ #include <memory>
+ 
+ //-----------------------------------------------------------------------------
+@@ -76,6 +77,9 @@ private:
+     class ModelRenderer* m_modelRenderer = nullptr; // ホットリロード対象（非所有）
+     Camera         m_camera;
+ 
++    RaytracingRenderer m_raytracer;              // DXR path (optional)
++    bool               m_useRaytracing = false;  // toggle: raster vs raytracing
++
+     std::vector<uint64_t> m_frameFenceValues;
+     uint32_t              m_frameIndex = 0;
+ };
+\ No newline at end of file
+diff --git a/SourceCode/Graphics/Gltfmodel.h b/SourceCode/Graphics/Gltfmodel.h
+index e6c1837..532f5e7 100644
+--- a/SourceCode/Graphics/Gltfmodel.h
++++ b/SourceCode/Graphics/Gltfmodel.h
+@@ -118,6 +118,18 @@ public:
+     const std::wstring& GetVSPath() const { return m_vsPath; }
+     const std::wstring& GetPSPath() const { return m_psPath; }
+ 
++    //-------------------------------------------------------------------
++    // Raytracing (DXR) accessors
++    //   The acceleration-structure builder walks nodes -> mesh -> primitives
++    //   and reads each primitive's vertex/index buffer. Buffers are UPLOAD
++    //   heaps (GENERIC_READ), a valid state for AS build inputs.
++    //-------------------------------------------------------------------
++    const std::vector<Mesh>&         GetMeshes()    const { return m_meshes; }
++    const std::vector<Node>&         GetNodes()     const { return m_nodes; }
++    const std::vector<MaterialData>& GetMaterials() const { return m_materials; }
++
++    static UINT VertexStride() { return sizeof(Vertex); }
++
+ private:
+     bool CreateRootSignature(ID3D12Device* device);
+     bool CreatePipelineState(ID3D12Device* device, DXGI_FORMAT rtvFormat);
+diff --git a/SourceCode/Graphics/RaytracingRenderer.cpp b/SourceCode/Graphics/RaytracingRenderer.cpp
+new file mode 100644
+index 0000000..8191330
+--- /dev/null
++++ b/SourceCode/Graphics/RaytracingRenderer.cpp
+@@ -0,0 +1,373 @@
++#include "Graphics/RaytracingRenderer.h"
++#include "Graphics/ShaderManager.h"
++#include "Graphics/GltfModel.h"
++#include "RHI/DeviceManager.h"
++#include "RHI/GpuBuffer.h"
++#include "Core/Scene.h"
++#include "Core/GameObject.h"
++#include "Component/ModelRenderer.h"
++#include "Camera/Camera.h"
++#include <cstring>
++
++using namespace DirectX;
++
++namespace
++{
++    constexpr UINT kShaderIdSize = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES; // 32
++    constexpr UINT kRecordAlign  = D3D12_RAYTRACING_SHADER_RECORD_BYTE_ALIGNMENT; // 32
++    constexpr UINT kTableAlign   = D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT;  // 64
++
++    inline UINT64 Align(UINT64 size, UINT64 align)
++    {
++        return (size + align - 1) & ~(align - 1);
++    }
++}
++
++//-----------------------------------------------------------------------------
++// Initialize
++//-----------------------------------------------------------------------------
++bool RaytracingRenderer::Initialize(Scene* scene, uint32_t width, uint32_t height)
++{
++    m_valid = false;
++    m_width = width;
++    m_height = height;
++
++    auto* dm = DeviceManager::Instance();
++    if (!dm->GetDeviceObj().SupportsRaytracing())
++    {
++        OutputDebugStringW(L"[RT] device does not support raytracing; skipping\n");
++        return false;
++    }
++
++    if (!BuildPipeline())                     return false;
++    if (!CreateOutputResource(width, height)) return false;
++    if (!m_sceneCB.Initialize(sizeof(SceneConstants))) return false;
++    if (!BuildAccelerationStructures(scene))  return false;
++    if (!BuildShaderTable())                  return false;
++
++    m_valid = true;
++    OutputDebugStringW(L"[RT] raytracing renderer ready\n");
++    return true;
++}
++
++//-----------------------------------------------------------------------------
++// BuildPipeline  -  compile the DXR library and create the state object
++//-----------------------------------------------------------------------------
++bool RaytracingRenderer::BuildPipeline()
++{
++    auto* dm = DeviceManager::Instance();
++    ID3D12Device5* dev5 = dm->GetDeviceObj().GetDevice5();
++    if (!dev5) return false;
++
++    std::vector<char> lib =
++        ShaderManager::Instance()->CompileLibrary(L"HLSL/PathTrace.hlsl");
++    if (lib.empty())
++    {
++        OutputDebugStringW(L"[RT] PathTrace.hlsl compile failed\n");
++        return false;
++    }
++    return m_pipeline.Initialize(dev5, lib);
++}
++
++//-----------------------------------------------------------------------------
++// BuildAccelerationStructures
++//   Walk every ModelRenderer in the scene: build one BLAS per primitive and
++//   one TLAS instance per (node, primitive). InstanceContributionToHitGroupIndex
++//   maps 1:1 to a shader-binding-table hit record, so SBT indexing stays trivial.
++//-----------------------------------------------------------------------------
++bool RaytracingRenderer::BuildAccelerationStructures(Scene* scene)
++{
++    if (!scene) return false;
++
++    auto* dm = DeviceManager::Instance();
++    ID3D12Device5* dev5 = dm->GetDeviceObj().GetDevice5();
++    auto& cmdCtx = dm->GetCommand();
++    ID3D12GraphicsCommandList4* cmd4 = cmdCtx.GetCommandList4();
++    if (!dev5 || !cmd4) return false;
++
++    // Start recording on the main command list (frame loop hasn't begun yet).
++    cmdCtx.Reset(0);
++
++    std::vector<D3D12_RAYTRACING_INSTANCE_DESC> instances;
++    UINT recordIndex = 0;
++
++    for (const auto& obj : scene->GetObjects())
++    {
++        if (!obj) continue;
++        ModelRenderer* mr = obj->GetComponent<ModelRenderer>();
++        if (!mr) continue;
++        GltfModel* model = mr->GetModel();
++        if (!model || !model->IsValid()) continue;
++
++        XMFLOAT4X4 world = mr->GetWorldMatrix();
++        XMMATRIX   worldM = XMLoadFloat4x4(&world);
++
++        const auto& nodes = model->GetNodes();
++        const auto& meshes = model->GetMeshes();
++        const auto& materials = model->GetMaterials();
++
++        for (const auto& node : nodes)
++        {
++            if (node.mesh < 0 || (size_t)node.mesh >= meshes.size()) continue;
++            const auto& mesh = meshes[node.mesh];
++
++            XMMATRIX   instM = XMLoadFloat4x4(&node.global_transform) * worldM;
++            XMFLOAT4X4 instWorld;
++            XMStoreFloat4x4(&instWorld, instM);
++
++            for (const auto& prim : mesh.primitives)
++            {
++                if (!prim.vertexBuffer || !prim.indexBuffer || prim.indexCount == 0)
++                    continue;
++
++                const UINT stride = prim.vbView.StrideInBytes;
++                const UINT vertexCount = stride ? prim.vbView.SizeInBytes / stride : 0;
++                if (vertexCount == 0) continue;
++
++                auto blas = RaytracingAccel::BuildBottomLevel(dev5, cmd4,
++                    prim.vbView.BufferLocation, vertexCount, stride,
++                    prim.ibView.BufferLocation, prim.indexCount);
++                if (!blas.IsValid()) continue;
++
++                D3D12_RAYTRACING_INSTANCE_DESC inst = {};
++                RaytracingAccel::FillInstanceTransform(inst.Transform, instWorld.m);
++                inst.InstanceID = recordIndex;
++                inst.InstanceMask = 0xFF;
++                inst.InstanceContributionToHitGroupIndex = recordIndex;
++                inst.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
++                inst.AccelerationStructure = blas.Address();
++                instances.push_back(inst);
++
++                HitRecordData hd;
++                hd.vbAddress = prim.vbView.BufferLocation;
++                hd.ibAddress = prim.ibView.BufferLocation;
++                if (prim.material >= 0 && (size_t)prim.material < materials.size())
++                    hd.baseColor = materials[prim.material].basecolor_factor;
++                m_hitData.push_back(hd);
++
++                m_blas.push_back(std::move(blas));
++                ++recordIndex;
++            }
++        }
++    }
++
++    if (instances.empty())
++    {
++        OutputDebugStringW(L"[RT] no geometry found for acceleration structures\n");
++        cmdCtx.ExecuteAndWait();
++        return false;
++    }
++
++    m_tlas = RaytracingAccel::BuildTopLevel(dev5, cmd4, instances);
++    cmdCtx.ExecuteAndWait();
++
++    if (!m_tlas.IsValid())
++        return false;
++
++    // Scratch buffers were only needed during the GPU build.
++    for (auto& b : m_blas) b.scratch.Reset();
++    m_tlas.scratch.Reset();
++    m_tlas.instanceDesc.Reset();
++    return true;
++}
++
++//-----------------------------------------------------------------------------
++// BuildShaderTable
++//   Layout in one upload buffer (each region aligned to 64 bytes):
++//     [ raygen record ][ miss records x2 ][ hit records xN ]
++//   A hit record is: shaderId(32) + vbVA(8) + ibVA(8) + baseColor(16) = 64.
++//-----------------------------------------------------------------------------
++bool RaytracingRenderer::BuildShaderTable()
++{
++    const void* idRayGen     = m_pipeline.GetShaderIdentifier(RaytracingPipeline::kRayGen);
++    const void* idMiss       = m_pipeline.GetShaderIdentifier(RaytracingPipeline::kMiss);
++    const void* idShadowMiss = m_pipeline.GetShaderIdentifier(RaytracingPipeline::kShadowMiss);
++    const void* idHitGroup   = m_pipeline.GetShaderIdentifier(RaytracingPipeline::kHitGroup);
++    if (!idRayGen || !idMiss || !idShadowMiss || !idHitGroup)
++    {
++        OutputDebugStringW(L"[RT] missing shader identifiers\n");
++        return false;
++    }
++
++    const UINT numMiss = 2;
++    const UINT numHit = static_cast<UINT>(m_hitData.size());
++
++    const UINT raygenStride = (UINT)Align(kShaderIdSize, kRecordAlign);          // 32
++    m_missStride = (UINT)Align(kShaderIdSize, kRecordAlign);                     // 32
++    m_hitStride  = (UINT)Align(kShaderIdSize + 8 + 8 + 16, kRecordAlign);        // 64
++
++    m_raygenRegionSize = raygenStride;
++    m_missRegionSize   = numMiss * m_missStride;
++    m_hitRegionSize    = numHit  * m_hitStride;
++
++    m_raygenOffset = 0;
++    m_missOffset = Align(m_raygenOffset + m_raygenRegionSize, kTableAlign);
++    m_hitOffset  = Align(m_missOffset + m_missRegionSize, kTableAlign);
++    const UINT64 total = m_hitOffset + m_hitRegionSize;
++
++    void* mapped = nullptr;
++    m_shaderTable = GpuBuffer::CreateUploadMapped(total, &mapped);
++    if (!m_shaderTable || !mapped)
++    {
++        OutputDebugStringW(L"[RT] shader table allocation failed\n");
++        return false;
++    }
++    uint8_t* base = static_cast<uint8_t*>(mapped);
++    memset(base, 0, static_cast<size_t>(total));
++
++    // raygen
++    memcpy(base + m_raygenOffset, idRayGen, kShaderIdSize);
++
++    // miss (index 0 = primary, index 1 = shadow)
++    memcpy(base + m_missOffset + 0 * m_missStride, idMiss, kShaderIdSize);
++    memcpy(base + m_missOffset + 1 * m_missStride, idShadowMiss, kShaderIdSize);
++
++    // hit records
++    for (UINT i = 0; i < numHit; ++i)
++    {
++        uint8_t* rec = base + m_hitOffset + (UINT64)i * m_hitStride;
++        memcpy(rec, idHitGroup, kShaderIdSize);
++        uint8_t* args = rec + kShaderIdSize;
++        memcpy(args + 0,  &m_hitData[i].vbAddress, sizeof(D3D12_GPU_VIRTUAL_ADDRESS));
++        memcpy(args + 8,  &m_hitData[i].ibAddress, sizeof(D3D12_GPU_VIRTUAL_ADDRESS));
++        memcpy(args + 16, &m_hitData[i].baseColor, sizeof(XMFLOAT4));
++    }
++    return true;
++}
++
++//-----------------------------------------------------------------------------
++// CreateOutputResource  -  UAV image the ray generation shader writes to.
++//   Format matches the back buffer so it can be CopyResource'd directly.
++//-----------------------------------------------------------------------------
++bool RaytracingRenderer::CreateOutputResource(uint32_t width, uint32_t height)
++{
++    auto* dm = DeviceManager::Instance();
++    ID3D12Device* device = dm->GetDevice();
++    const DXGI_FORMAT fmt = dm->GetRTVFormat();
++
++    D3D12_HEAP_PROPERTIES heap = {};
++    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
++
++    D3D12_RESOURCE_DESC td = {};
++    td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
++    td.Width = width;
++    td.Height = height;
++    td.DepthOrArraySize = 1;
++    td.MipLevels = 1;
++    td.Format = fmt;
++    td.SampleDesc.Count = 1;
++    td.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
++    td.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
++
++    m_output.Reset();
++    if (FAILED(device->CreateCommittedResource(
++        &heap, D3D12_HEAP_FLAG_NONE, &td,
++        D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&m_output))))
++    {
++        OutputDebugStringW(L"[RT] output image creation failed\n");
++        return false;
++    }
++    m_output->SetName(L"RT_Output");
++
++    // Allocate the UAV descriptor once and reuse the slot on resize.
++    if (!m_uavAllocated)
++    {
++        if (!m_uavHeap.IsValid())
++            m_uavHeap.Initialize(device, 4, /*shaderVisible*/ true);
++        auto handle = m_uavHeap.Allocate();
++        m_outputUavCpu = handle.cpu;
++        m_outputUavGpu = handle.gpu;
++        m_uavAllocated = true;
++    }
++
++    D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {};
++    uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
++    uav.Format = fmt;
++    device->CreateUnorderedAccessView(m_output.Get(), nullptr, &uav, m_outputUavCpu);
++    return true;
++}
++
++//-----------------------------------------------------------------------------
++// Resize
++//-----------------------------------------------------------------------------
++void RaytracingRenderer::Resize(uint32_t width, uint32_t height)
++{
++    if (!m_valid || width == 0 || height == 0) return;
++    if (width == m_width && height == m_height) return;
++    m_width = width;
++    m_height = height;
++    CreateOutputResource(width, height);
++}
++
++//-----------------------------------------------------------------------------
++// Render  -  dispatch rays and copy the result into the current back buffer.
++//-----------------------------------------------------------------------------
++void RaytracingRenderer::Render(const Camera& camera)
++{
++    if (!m_valid) return;
++
++    auto* dm = DeviceManager::Instance();
++    auto& cmdCtx = dm->GetCommand();
++    ID3D12GraphicsCommandList4* cmd4 = cmdCtx.GetCommandList4();
++    if (!cmd4) return;
++
++    // ---- scene constants (camera + light) ----------------------------
++    SceneConstants sc = {};
++    const float aspect = dm->GetScreenWidth() / dm->GetScreenHeight();
++
++    XMVECTOR eye = XMLoadFloat3(&camera.eye);
++    XMVECTOR focus = XMLoadFloat3(&camera.focus);
++    XMVECTOR up = XMLoadFloat3(&camera.up);
++    XMMATRIX view = XMMatrixLookAtLH(eye, focus, up);
++    XMMATRIX proj = XMMatrixPerspectiveFovLH(
++        XMConvertToRadians(camera.fovDegree), aspect, camera.nearZ, camera.farZ);
++    XMMATRIX viewProj = view * proj;
++    XMVECTOR det;
++    XMMATRIX invVP = XMMatrixInverse(&det, viewProj);
++    XMStoreFloat4x4(&sc.invViewProj, invVP);
++
++    sc.cameraPos = XMFLOAT4(camera.eye.x, camera.eye.y, camera.eye.z, 1.0f);
++    sc.lightDir = camera.lightDir;
++    sc.lightColor = camera.lightColor;
++    sc.ambient = camera.ambient;
++    sc.frame = XMUINT4(m_frameCounter++, 0, 0, 0);
++    m_sceneCB.Update(sc);
++
++    // ---- bind and dispatch -------------------------------------------
++    ID3D12DescriptorHeap* heaps[] = { m_uavHeap.GetHeap() };
++    cmd4->SetDescriptorHeaps(1, heaps);
++    cmd4->SetComputeRootSignature(m_pipeline.GetGlobalRootSig());
++    cmd4->SetComputeRootDescriptorTable(0, m_outputUavGpu);
++    cmd4->SetComputeRootShaderResourceView(1, m_tlas.Address());
++    cmd4->SetComputeRootConstantBufferView(2, m_sceneCB.GetGpuAddress());
++    cmd4->SetPipelineState1(m_pipeline.GetStateObject());
++
++    const D3D12_GPU_VIRTUAL_ADDRESS sbt = m_shaderTable->GetGPUVirtualAddress();
++    D3D12_DISPATCH_RAYS_DESC desc = {};
++    desc.RayGenerationShaderRecord.StartAddress = sbt + m_raygenOffset;
++    desc.RayGenerationShaderRecord.SizeInBytes = m_raygenRegionSize;
++    desc.MissShaderTable.StartAddress = sbt + m_missOffset;
++    desc.MissShaderTable.SizeInBytes = m_missRegionSize;
++    desc.MissShaderTable.StrideInBytes = m_missStride;
++    desc.HitGroupTable.StartAddress = sbt + m_hitOffset;
++    desc.HitGroupTable.SizeInBytes = m_hitRegionSize;
++    desc.HitGroupTable.StrideInBytes = m_hitStride;
++    desc.Width = m_width;
++    desc.Height = m_height;
++    desc.Depth = 1;
++    cmd4->DispatchRays(&desc);
++
++    // ---- copy output image into the back buffer ----------------------
++    ID3D12Resource* backbuffer = dm->GetSwapChain().GetCurrentBackBuffer();
++    cmdCtx.ResourceBarrier(m_output.Get(),
++        D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
++    cmdCtx.ResourceBarrier(backbuffer,
++        D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST);
++
++    cmd4->CopyResource(backbuffer, m_output.Get());
++
++    cmdCtx.ResourceBarrier(backbuffer,
++        D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
++    cmdCtx.ResourceBarrier(m_output.Get(),
++        D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
++}
+diff --git a/SourceCode/Graphics/RaytracingRenderer.h b/SourceCode/Graphics/RaytracingRenderer.h
+new file mode 100644
+index 0000000..457c6d0
+--- /dev/null
++++ b/SourceCode/Graphics/RaytracingRenderer.h
+@@ -0,0 +1,114 @@
++#pragma once
++#define NOMINMAX
++#include <d3d12.h>
++#include <wrl/client.h>
++#include <DirectXMath.h>
++#include <vector>
++#include "RHI/RaytracingPipeline.h"
++#include "RHI/RaytracingAccel.h"
++#include "RHI/DescriptorHeap.h"
++#include "RHI/ConstantBuffer.h"
++
++using Microsoft::WRL::ComPtr;
++
++class Scene;
++class Camera;
++
++//-----------------------------------------------------------------------------
++// RaytracingRenderer  (DXR milestone 1)
++//  Renders the scene's glTF models with hardware ray tracing:
++//    primary rays through the camera + hard shadows from the directional light.
++//
++//  Pipeline:
++//    Initialize(scene) : compile the RT library, build the state object,
++//                        build BLAS/TLAS from all ModelRenderer geometry,
++//                        build the shader binding table, create the output image.
++//    Render(cmd4, cam) : dispatch rays into the output image and copy it into
++//                        the current back buffer.
++//
++//  This runs alongside the existing rasterizer; Framework chooses which path to
++//  use each frame. It requires Device::SupportsRaytracing() == true.
++//-----------------------------------------------------------------------------
++class RaytracingRenderer
++{
++public:
++    RaytracingRenderer() = default;
++    ~RaytracingRenderer() = default;
++
++    RaytracingRenderer(const RaytracingRenderer&) = delete;
++    RaytracingRenderer& operator=(const RaytracingRenderer&) = delete;
++
++    // Build everything from the scene. Returns false if DXR is unavailable or a
++    // build step fails (in which case IsValid() stays false and the app should
++    // fall back to the rasterizer).
++    bool Initialize(Scene* scene, uint32_t width, uint32_t height);
++
++    // Trace one frame and copy the result into the current back buffer.
++    // The back buffer must be in RENDER_TARGET state on entry (as left by
++    // Framework::BeginFrame); it is returned in RENDER_TARGET state.
++    void Render(const Camera& camera);
++
++    // Recreate the output image after a window resize.
++    void Resize(uint32_t width, uint32_t height);
++
++    bool IsValid() const { return m_valid; }
++    size_t GetInstanceCount() const { return m_hitData.size(); }
++
++private:
++    // Scene constants passed to the ray generation / shading shaders (b0).
++    struct SceneConstants
++    {
++        DirectX::XMFLOAT4X4 invViewProj;
++        DirectX::XMFLOAT4   cameraPos;
++        DirectX::XMFLOAT4   lightDir;
++        DirectX::XMFLOAT4   lightColor;
++        DirectX::XMFLOAT4   ambient;
++        DirectX::XMUINT4    frame;
++    };
++
++    // Per-hit-record local root arguments (must match the local root signature
++    // order: vertex SRV, index SRV, base color constants).
++    struct HitRecordData
++    {
++        D3D12_GPU_VIRTUAL_ADDRESS vbAddress = 0;
++        D3D12_GPU_VIRTUAL_ADDRESS ibAddress = 0;
++        DirectX::XMFLOAT4         baseColor = { 0.8f, 0.8f, 0.8f, 1.0f };
++    };
++
++    bool BuildPipeline();
++    bool BuildAccelerationStructures(Scene* scene);
++    bool BuildShaderTable();
++    bool CreateOutputResource(uint32_t width, uint32_t height);
++
++    bool     m_valid = false;
++    uint32_t m_width = 0;
++    uint32_t m_height = 0;
++    uint32_t m_frameCounter = 0;
++
++    RaytracingPipeline m_pipeline;
++
++    // Acceleration structures (kept alive while rendering).
++    std::vector<RaytracingAccel::AccelBuffers> m_blas;
++    RaytracingAccel::AccelBuffers              m_tlas;
++    std::vector<HitRecordData>                 m_hitData;
++
++    // Shader binding table (one upload buffer, mapped).
++    ComPtr<ID3D12Resource> m_shaderTable;
++    UINT m_raygenRegionSize = 0;
++    UINT m_missRegionSize = 0;
++    UINT m_missStride = 0;
++    UINT m_hitRegionSize = 0;
++    UINT m_hitStride = 0;
++    UINT64 m_raygenOffset = 0;
++    UINT64 m_missOffset = 0;
++    UINT64 m_hitOffset = 0;
++
++    // Output image (UAV) + its descriptor heap.
++    ComPtr<ID3D12Resource>      m_output;
++    DescriptorHeap              m_uavHeap;
++    D3D12_CPU_DESCRIPTOR_HANDLE m_outputUavCpu = {};
++    D3D12_GPU_DESCRIPTOR_HANDLE m_outputUavGpu = {};
++    bool                        m_uavAllocated = false;
++
++    ConstantBuffer m_sceneCB;
++};
+diff --git a/SourceCode/Graphics/Shadermanager.cpp b/SourceCode/Graphics/Shadermanager.cpp
+index 58e4e27..c7c7b67 100644
+--- a/SourceCode/Graphics/Shadermanager.cpp
++++ b/SourceCode/Graphics/Shadermanager.cpp
+@@ -118,5 +118,86 @@ std::vector<char> ShaderManager::CompileFromFile(const wchar_t* hlslPath,
+     sprintf_s(dbg, "[ShaderManager] コンパイル成功 サイズ=%zu バイト\n", (size_t)shaderBlob->GetBufferSize());
+     OutputDebugStringA(dbg);
+     
++    return std::vector<char>(p, p + shaderBlob->GetBufferSize());
++}
++
++//-----------------------------------------------------------------------------
++// CompileLibrary  -  Compile a DXR shader library (lib_6_3) with dxc.
++//   A library has no single entry point; all [shader("...")] functions in the
++//   file are exported. The resulting DXIL blob is fed to a state object.
++//-----------------------------------------------------------------------------
++std::vector<char> ShaderManager::CompileLibrary(const wchar_t* hlslPath,
++    const wchar_t* target)
++{
++    OutputDebugStringW(L"[ShaderManager] compile library: ");
++    OutputDebugStringW(hlslPath);
++    OutputDebugStringW(L"\n");
++
++    ComPtr<IDxcUtils>          utils;
++    ComPtr<IDxcCompiler3>      compiler;
++    ComPtr<IDxcIncludeHandler> includeHandler;
++    if (FAILED(DxcCreateInstance(CLSID_DxcUtils, IID_PPV_ARGS(&utils))) ||
++        FAILED(DxcCreateInstance(CLSID_DxcCompiler, IID_PPV_ARGS(&compiler))))
++    {
++        OutputDebugStringW(L"[ShaderManager] dxc init failed\n");
++        return {};
++    }
++    utils->CreateDefaultIncludeHandler(&includeHandler);
++
++    ComPtr<IDxcBlobEncoding> source;
++    if (FAILED(utils->LoadFile(hlslPath, nullptr, &source)))
++    {
++        OutputDebugStringW(L"[ShaderManager] cannot open .hlsl: ");
++        OutputDebugStringW(hlslPath);
++        OutputDebugStringW(L"\n");
++        return {};
++    }
++
++    // No -E for a library; just the library target.
++    LPCWSTR args[] =
++    {
++        hlslPath,
++        L"-T", target,
++        L"-Zi",
++        L"-Qembed_debug",
++    };
++
++    DxcBuffer sourceBuffer = {};
++    sourceBuffer.Ptr = source->GetBufferPointer();
++    sourceBuffer.Size = source->GetBufferSize();
++    sourceBuffer.Encoding = DXC_CP_ACP;
++
++    ComPtr<IDxcResult> result;
++    if (FAILED(compiler->Compile(
++        &sourceBuffer, args, _countof(args),
++        includeHandler.Get(), IID_PPV_ARGS(&result))))
++    {
++        OutputDebugStringW(L"[ShaderManager] library compile call failed\n");
++        return {};
++    }
++
++    ComPtr<IDxcBlobUtf8> errors;
++    result->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(&errors), nullptr);
++    if (errors && errors->GetStringLength() > 0)
++    {
++        OutputDebugStringA("[ShaderManager] library compile errors/warnings:\n");
++        OutputDebugStringA(errors->GetStringPointer());
++        OutputDebugStringA("\n");
++    }
++
++    HRESULT status;
++    result->GetStatus(&status);
++    if (FAILED(status))
++    {
++        OutputDebugStringW(L"[ShaderManager] library compile failed\n");
++        return {};
++    }
++
++    ComPtr<IDxcBlob> shaderBlob;
++    result->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&shaderBlob), nullptr);
++    if (!shaderBlob)
++        return {};
++
++    const char* p = static_cast<const char*>(shaderBlob->GetBufferPointer());
+     return std::vector<char>(p, p + shaderBlob->GetBufferSize());
+ }
+\ No newline at end of file
+diff --git a/SourceCode/Graphics/Shadermanager.h b/SourceCode/Graphics/Shadermanager.h
+index 4030ebe..21c8470 100644
+--- a/SourceCode/Graphics/Shadermanager.h
++++ b/SourceCode/Graphics/Shadermanager.h
+@@ -33,6 +33,14 @@ public:
+         const wchar_t* entryPoint,
+         const wchar_t* target);
+ 
++    /// @brief Compile a DXR shader library (target "lib_6_3", no entry point).
++    ///        Returns the DXIL library blob used to build an RT state object.
++    ///        Empty vector on failure.
++    /// @param hlslPath  path to the .hlsl containing [shader("...")] functions
++    /// @param target    library target ("lib_6_3" by default)
++    std::vector<char> CompileLibrary(const wchar_t* hlslPath,
++        const wchar_t* target = L"lib_6_3");
++
+ private:
+     ShaderManager() = default;
+     ~ShaderManager() = default;
+diff --git a/SourceCode/RHI/CommandContext.cpp b/SourceCode/RHI/CommandContext.cpp
+index 08b2775..d936411 100644
+--- a/SourceCode/RHI/CommandContext.cpp
++++ b/SourceCode/RHI/CommandContext.cpp
+@@ -56,6 +56,10 @@ bool CommandContext::Initialize(ID3D12Device* device,
+         return false;
+     }
+     m_commandList->SetName(L"MainCommandList");
++
++    // DXR: try to obtain the ID3D12GraphicsCommandList4 view (stays null on
++    // machines without DXR; the raytracing renderer checks for it).
++    m_commandList.As(&m_commandList4);
+     m_commandList->Close(); // 生成直後はクローズ状態にする
+ 
+     // ---- フェンス -------------------------------------------------------
+diff --git a/SourceCode/RHI/CommandContext.h b/SourceCode/RHI/CommandContext.h
+index 0c42800..949d685 100644
+--- a/SourceCode/RHI/CommandContext.h
++++ b/SourceCode/RHI/CommandContext.h
+@@ -62,6 +62,10 @@ public:
+     // アクセサ
+     //-------------------------------------------------------------------
+     ID3D12GraphicsCommandList* GetCommandList() const { return m_commandList.Get(); }
++
++    // DXR command list (DispatchRays / BuildRaytracingAccelerationStructure /
++    // SetPipelineState1). Returns nullptr if the OS/driver has no DXR support.
++    ID3D12GraphicsCommandList4* GetCommandList4() const { return m_commandList4.Get(); }
+     ID3D12CommandQueue* GetQueue()       const { return m_queue.Get(); }
+     Fence& GetFence() { return m_fence; }
+     const Fence& GetFence()       const { return m_fence; }
+@@ -89,6 +93,7 @@ private:
+     ComPtr<ID3D12CommandQueue>              m_queue;
+     std::vector<ComPtr<ID3D12CommandAllocator>> m_allocators; // フレーム数分
+     ComPtr<ID3D12GraphicsCommandList>       m_commandList;
++    ComPtr<ID3D12GraphicsCommandList4>      m_commandList4; // DXR (may be null)
+     Fence                                   m_fence;
+ 
+     D3D12_COMMAND_LIST_TYPE m_type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+diff --git a/SourceCode/RHI/Device.cpp b/SourceCode/RHI/Device.cpp
+index 581c57c..b890312 100644
+--- a/SourceCode/RHI/Device.cpp
++++ b/SourceCode/RHI/Device.cpp
+@@ -152,6 +152,22 @@ bool Device::CreateDevice()
+                 (UINT)fl >> 12, ((UINT)fl >> 8) & 0xF,
+                 m_adapterInfo.description.c_str());
+             OutputDebugStringW(buf);
++
++            // ---- DXR support check ------------------------------------
++            // Query ID3D12Device5 and read RaytracingTier from OPTIONS5.
++            if (SUCCEEDED(m_device.As(&m_device5)))
++            {
++                D3D12_FEATURE_DATA_D3D12_OPTIONS5 opt5 = {};
++                if (SUCCEEDED(m_device5->CheckFeatureSupport(
++                    D3D12_FEATURE_D3D12_OPTIONS5, &opt5, sizeof(opt5))))
++                {
++                    m_raytracingSupported =
++                        (opt5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_0);
++                }
++            }
++            OutputDebugStringW(m_raytracingSupported
++                ? L"[DX12] DXR (Raytracing Tier 1.0+) : supported\n"
++                : L"[DX12] DXR (Raytracing)           : NOT supported\n");
+             return true;
+         }
+     }
+diff --git a/SourceCode/RHI/Device.h b/SourceCode/RHI/Device.h
+index e018abe..d16582d 100644
+--- a/SourceCode/RHI/Device.h
++++ b/SourceCode/RHI/Device.h
+@@ -50,6 +50,14 @@ public:
+     IDXGIFactory6* GetFactory() const { return m_factory.Get(); }
+     IDXGIAdapter1* GetAdapter() const { return m_adapter.Get(); }
+ 
++    // ---- DXR (DirectX Raytracing) ------------------------------------
++    // ID3D12Device5 is required for BuildRaytracingAccelerationStructure,
++    // CreateStateObject, etc. Returns nullptr on devices without DXR.
++    ID3D12Device5* GetDevice5() const { return m_device5.Get(); }
++
++    // True when the adapter/driver reports RaytracingTier >= 1.0.
++    bool SupportsRaytracing() const { return m_raytracingSupported; }
++
+     const AdapterInfo& GetAdapterInfo() const { return m_adapterInfo; }
+ 
+     /// @brief MSAA サポートレベルを確認する
+@@ -67,6 +75,8 @@ private:
+     ComPtr<IDXGIFactory6>  m_factory;
+     ComPtr<IDXGIAdapter1>  m_adapter;
+     ComPtr<ID3D12Device>   m_device;
++    ComPtr<ID3D12Device5>  m_device5;            // DXR interface (may be null)
++    bool                   m_raytracingSupported = false;
+ 
+     AdapterInfo m_adapterInfo;
+ };
+\ No newline at end of file
+diff --git a/SourceCode/RHI/RaytracingAccel.cpp b/SourceCode/RHI/RaytracingAccel.cpp
+new file mode 100644
+index 0000000..736762e
+--- /dev/null
++++ b/SourceCode/RHI/RaytracingAccel.cpp
+@@ -0,0 +1,192 @@
++#include "RHI/RaytracingAccel.h"
++#include <cstring>
++
++namespace
++{
++    // Create a DEFAULT-heap buffer that allows unordered access. Used for both
++    // scratch and result buffers of an acceleration structure.
++    ComPtr<ID3D12Resource> CreateUavBuffer(
++        ID3D12Device* device, UINT64 size, D3D12_RESOURCE_STATES initialState)
++    {
++        D3D12_HEAP_PROPERTIES heap = {};
++        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
++
++        D3D12_RESOURCE_DESC desc = {};
++        desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
++        desc.Alignment = 0;
++        desc.Width = size;
++        desc.Height = 1;
++        desc.DepthOrArraySize = 1;
++        desc.MipLevels = 1;
++        desc.Format = DXGI_FORMAT_UNKNOWN;
++        desc.SampleDesc.Count = 1;
++        desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
++
++        ComPtr<ID3D12Resource> res;
++        device->CreateCommittedResource(
++            &heap, D3D12_HEAP_FLAG_NONE, &desc,
++            initialState, nullptr, IID_PPV_ARGS(&res));
++        return res;
++    }
++
++    // Create an UPLOAD-heap buffer and copy data into it.
++    ComPtr<ID3D12Resource> CreateUploadWithData(
++        ID3D12Device* device, const void* data, UINT64 size)
++    {
++        D3D12_HEAP_PROPERTIES heap = {};
++        heap.Type = D3D12_HEAP_TYPE_UPLOAD;
++
++        D3D12_RESOURCE_DESC desc = {};
++        desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
++        desc.Width = size;
++        desc.Height = 1;
++        desc.DepthOrArraySize = 1;
++        desc.MipLevels = 1;
++        desc.Format = DXGI_FORMAT_UNKNOWN;
++        desc.SampleDesc.Count = 1;
++        desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++
++        ComPtr<ID3D12Resource> res;
++        if (FAILED(device->CreateCommittedResource(
++            &heap, D3D12_HEAP_FLAG_NONE, &desc,
++            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&res))))
++            return nullptr;
++
++        if (data)
++        {
++            void* mapped = nullptr;
++            D3D12_RANGE noRead = { 0, 0 };
++            if (SUCCEEDED(res->Map(0, &noRead, &mapped)))
++            {
++                memcpy(mapped, data, static_cast<size_t>(size));
++                res->Unmap(0, nullptr);
++            }
++        }
++        return res;
++    }
++
++    void InsertUavBarrier(ID3D12GraphicsCommandList4* cmd, ID3D12Resource* res)
++    {
++        D3D12_RESOURCE_BARRIER b = {};
++        b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
++        b.UAV.pResource = res;
++        cmd->ResourceBarrier(1, &b);
++    }
++}
++
++namespace RaytracingAccel
++{
++    AccelBuffers BuildBottomLevel(
++        ID3D12Device5* device,
++        ID3D12GraphicsCommandList4* cmd,
++        D3D12_GPU_VIRTUAL_ADDRESS vbAddress, uint32_t vertexCount, uint32_t vertexStride,
++        D3D12_GPU_VIRTUAL_ADDRESS ibAddress, uint32_t indexCount)
++    {
++        AccelBuffers out;
++
++        D3D12_RAYTRACING_GEOMETRY_DESC geo = {};
++        geo.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
++        geo.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
++        geo.Triangles.VertexBuffer.StartAddress = vbAddress;
++        geo.Triangles.VertexBuffer.StrideInBytes = vertexStride;
++        geo.Triangles.VertexCount = vertexCount;
++        geo.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT; // position @ offset 0
++        geo.Triangles.IndexBuffer = ibAddress;
++        geo.Triangles.IndexCount = indexCount;
++        geo.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
++        geo.Triangles.Transform3x4 = 0;
++
++        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {};
++        inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
++        inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
++        inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
++        inputs.NumDescs = 1;
++        inputs.pGeometryDescs = &geo;
++
++        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info = {};
++        device->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &info);
++        if (info.ResultDataMaxSizeInBytes == 0)
++            return out;
++
++        out.scratch = CreateUavBuffer(device, info.ScratchDataSizeInBytes,
++            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
++        out.result = CreateUavBuffer(device, info.ResultDataMaxSizeInBytes,
++            D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
++        if (!out.scratch || !out.result)
++        {
++            out = {};
++            return out;
++        }
++
++        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC build = {};
++        build.Inputs = inputs;
++        build.ScratchAccelerationStructureData = out.scratch->GetGPUVirtualAddress();
++        build.DestAccelerationStructureData = out.result->GetGPUVirtualAddress();
++
++        cmd->BuildRaytracingAccelerationStructure(&build, 0, nullptr);
++        InsertUavBarrier(cmd, out.result.Get());
++        return out;
++    }
++
++    AccelBuffers BuildTopLevel(
++        ID3D12Device5* device,
++        ID3D12GraphicsCommandList4* cmd,
++        const std::vector<D3D12_RAYTRACING_INSTANCE_DESC>& instances)
++    {
++        AccelBuffers out;
++        if (instances.empty())
++            return out;
++
++        // Upload the instance descriptor array.
++        const UINT64 instBytes =
++            sizeof(D3D12_RAYTRACING_INSTANCE_DESC) * instances.size();
++        out.instanceDesc = CreateUploadWithData(device, instances.data(), instBytes);
++        if (!out.instanceDesc)
++            return out;
++
++        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {};
++        inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
++        inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
++        inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
++        inputs.NumDescs = static_cast<UINT>(instances.size());
++        inputs.InstanceDescs = out.instanceDesc->GetGPUVirtualAddress();
++
++        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info = {};
++        device->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &info);
++        if (info.ResultDataMaxSizeInBytes == 0)
++        {
++            out = {};
++            return out;
++        }
++
++        out.scratch = CreateUavBuffer(device, info.ScratchDataSizeInBytes,
++            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
++        out.result = CreateUavBuffer(device, info.ResultDataMaxSizeInBytes,
++            D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
++        if (!out.scratch || !out.result)
++        {
++            out = {};
++            return out;
++        }
++
++        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC build = {};
++        build.Inputs = inputs;
++        build.ScratchAccelerationStructureData = out.scratch->GetGPUVirtualAddress();
++        build.DestAccelerationStructureData = out.result->GetGPUVirtualAddress();
++
++        cmd->BuildRaytracingAccelerationStructure(&build, 0, nullptr);
++        InsertUavBarrier(cmd, out.result.Get());
++        return out;
++    }
++
++    void FillInstanceTransform(float dst[3][4], const float src[4][4])
++    {
++        // src is row-vector (v' = v * M): translation lives in row 3.
++        // DXR wants column-vector (v' = T * v): a standard 3x4 with translation
++        // in the last column. That is the transpose of the upper 3x4 of M.
++        for (int r = 0; r < 3; ++r)
++            for (int c = 0; c < 4; ++c)
++                dst[r][c] = src[c][r];
++    }
++}
+diff --git a/SourceCode/RHI/RaytracingAccel.h b/SourceCode/RHI/RaytracingAccel.h
+new file mode 100644
+index 0000000..0957c25
+--- /dev/null
++++ b/SourceCode/RHI/RaytracingAccel.h
+@@ -0,0 +1,68 @@
++#pragma once
++#include <d3d12.h>
++#include <wrl/client.h>
++#include <cstdint>
++#include <vector>
++
++using Microsoft::WRL::ComPtr;
++
++//-----------------------------------------------------------------------------
++// RaytracingAccel
++//  Helpers that build DXR acceleration structures (BLAS / TLAS).
++//
++//  DXR uses a two-level structure:
++//    BLAS (Bottom Level) : the triangles of one mesh, in object space.
++//    TLAS (Top Level)    : instances that each point at a BLAS with a
++//                          per-instance world transform.
++//
++//  A build needs three GPU buffers:
++//    - result  : the acceleration structure itself (keep alive while used).
++//    - scratch : temporary work memory (keep alive only until the GPU
++//                finishes the build, i.e. until Execute+Wait completes).
++//    - instanceDesc (TLAS only) : upload buffer holding the instance array.
++//
++//  Usage (build once for a static scene):
++//    cmd->Reset(...);
++//    auto blas = RaytracingAccel::BuildBottomLevel(dev5, cmd4, ...);
++//    // fill instance descs referencing blas.Result()->GetGPUVirtualAddress()
++//    auto tlas = RaytracingAccel::BuildTopLevel(dev5, cmd4, instances);
++//    cmd->ExecuteAndWait();     // <- scratch buffers can be freed after this
++//-----------------------------------------------------------------------------
++namespace RaytracingAccel
++{
++    // Bundle of GPU buffers produced by a build.
++    struct AccelBuffers
++    {
++        ComPtr<ID3D12Resource> result;       // the BLAS/TLAS (persistent)
++        ComPtr<ID3D12Resource> scratch;      // free after GPU build completes
++        ComPtr<ID3D12Resource> instanceDesc; // TLAS only (upload buffer)
++
++        ID3D12Resource* Result() const { return result.Get(); }
++        D3D12_GPU_VIRTUAL_ADDRESS Address() const
++        {
++            return result ? result->GetGPUVirtualAddress() : 0;
++        }
++        bool IsValid() const { return result != nullptr; }
++    };
++
++    // Build a BLAS from a single indexed triangle geometry.
++    //   vbAddress : GPU VA of the vertex buffer (position must be at offset 0,
++    //               format R32G32B32_FLOAT, stride = vertexStride)
++    //   ibAddress : GPU VA of a 32-bit index buffer (R32_UINT)
++    AccelBuffers BuildBottomLevel(
++        ID3D12Device5* device,
++        ID3D12GraphicsCommandList4* cmd,
++        D3D12_GPU_VIRTUAL_ADDRESS vbAddress, uint32_t vertexCount, uint32_t vertexStride,
++        D3D12_GPU_VIRTUAL_ADDRESS ibAddress, uint32_t indexCount);
++
++    // Build a TLAS over the given instance descriptors.
++    AccelBuffers BuildTopLevel(
++        ID3D12Device5* device,
++        ID3D12GraphicsCommandList4* cmd,
++        const std::vector<D3D12_RAYTRACING_INSTANCE_DESC>& instances);
++
++    // Fill a D3D12 instance transform (3x4, column-vector / row-major) from a
++    // DirectXMath-style row-vector 4x4 world matrix (m[row][col]). This applies
++    // the transpose that converts between the two conventions.
++    void FillInstanceTransform(float dst[3][4], const float src[4][4]);
++}
+diff --git a/SourceCode/RHI/RaytracingPipeline.cpp b/SourceCode/RHI/RaytracingPipeline.cpp
+new file mode 100644
+index 0000000..67be86d
+--- /dev/null
++++ b/SourceCode/RHI/RaytracingPipeline.cpp
+@@ -0,0 +1,192 @@
++#include "RHI/RaytracingPipeline.h"
++#include "d3dx12.h"          // CD3DX12_STATE_OBJECT_DESC (DirectXTK12/Src)
++#include <cstdio>
++
++//-----------------------------------------------------------------------------
++// Payload / attribute sizes (must match PathTrace.hlsl)
++//   Payload : float3 color + float  hitT   = 16 bytes
++//   Attrib  : float2 barycentrics          = 8 bytes (built-in triangle attr)
++//-----------------------------------------------------------------------------
++static constexpr UINT kPayloadSize = 4 * sizeof(float); // 16
++static constexpr UINT kAttribSize  = 2 * sizeof(float); // 8
++static constexpr UINT kMaxRecursion = 2;                // primary + shadow
++
++//-----------------------------------------------------------------------------
++// Global root signature
++//   param0 : descriptor table { UAV u0 }  -> output image
++//   param1 : SRV  t0 (root)               -> TLAS
++//   param2 : CBV  b0 (root)               -> scene constants
++//-----------------------------------------------------------------------------
++bool RaytracingPipeline::CreateGlobalRootSignature(ID3D12Device5* device)
++{
++    D3D12_DESCRIPTOR_RANGE uavRange = {};
++    uavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
++    uavRange.NumDescriptors = 1;
++    uavRange.BaseShaderRegister = 0;      // u0
++    uavRange.RegisterSpace = 0;
++    uavRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
++
++    D3D12_ROOT_PARAMETER params[3] = {};
++    // param0: UAV table
++    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
++    params[0].DescriptorTable.NumDescriptorRanges = 1;
++    params[0].DescriptorTable.pDescriptorRanges = &uavRange;
++    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
++    // param1: TLAS SRV (t0)
++    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
++    params[1].Descriptor.ShaderRegister = 0; // t0
++    params[1].Descriptor.RegisterSpace = 0;
++    params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
++    // param2: scene CBV (b0)
++    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
++    params[2].Descriptor.ShaderRegister = 0; // b0
++    params[2].Descriptor.RegisterSpace = 0;
++    params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
++
++    D3D12_ROOT_SIGNATURE_DESC desc = {};
++    desc.NumParameters = _countof(params);
++    desc.pParameters = params;
++    desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
++
++    ComPtr<ID3DBlob> blob, err;
++    if (FAILED(D3D12SerializeRootSignature(
++        &desc, D3D_ROOT_SIGNATURE_VERSION_1_0, &blob, &err)))
++    {
++        if (err) OutputDebugStringA((const char*)err->GetBufferPointer());
++        OutputDebugStringW(L"[RT] global root signature serialize failed\n");
++        return false;
++    }
++    if (FAILED(device->CreateRootSignature(
++        0, blob->GetBufferPointer(), blob->GetBufferSize(),
++        IID_PPV_ARGS(&m_globalRootSig))))
++    {
++        OutputDebugStringW(L"[RT] global root signature create failed\n");
++        return false;
++    }
++    m_globalRootSig->SetName(L"RT_GlobalRootSig");
++    return true;
++}
++
++//-----------------------------------------------------------------------------
++// Local root signature (per hit-group record)
++//   param0 : SRV t1 (root) -> vertex buffer (StructuredBuffer<Vertex>)
++//   param1 : SRV t2 (root) -> index buffer  (StructuredBuffer<uint>)
++//   param2 : 4x 32-bit root constants b1 -> base color (rgba)
++//-----------------------------------------------------------------------------
++bool RaytracingPipeline::CreateLocalRootSignature(ID3D12Device5* device)
++{
++    D3D12_ROOT_PARAMETER params[3] = {};
++    // param0: vertex buffer SRV (t1)
++    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
++    params[0].Descriptor.ShaderRegister = 1; // t1
++    params[0].Descriptor.RegisterSpace = 0;
++    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
++    // param1: index buffer SRV (t2)
++    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
++    params[1].Descriptor.ShaderRegister = 2; // t2
++    params[1].Descriptor.RegisterSpace = 0;
++    params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
++    // param2: base color as 4 root constants (b1)
++    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
++    params[2].Constants.ShaderRegister = 1; // b1
++    params[2].Constants.RegisterSpace = 0;
++    params[2].Constants.Num32BitValues = 4;
++    params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
++
++    D3D12_ROOT_SIGNATURE_DESC desc = {};
++    desc.NumParameters = _countof(params);
++    desc.pParameters = params;
++    desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_LOCAL_ROOT_SIGNATURE;
++
++    ComPtr<ID3DBlob> blob, err;
++    if (FAILED(D3D12SerializeRootSignature(
++        &desc, D3D_ROOT_SIGNATURE_VERSION_1_0, &blob, &err)))
++    {
++        if (err) OutputDebugStringA((const char*)err->GetBufferPointer());
++        OutputDebugStringW(L"[RT] local root signature serialize failed\n");
++        return false;
++    }
++    if (FAILED(device->CreateRootSignature(
++        0, blob->GetBufferPointer(), blob->GetBufferSize(),
++        IID_PPV_ARGS(&m_localRootSig))))
++    {
++        OutputDebugStringW(L"[RT] local root signature create failed\n");
++        return false;
++    }
++    m_localRootSig->SetName(L"RT_LocalRootSig");
++    return true;
++}
++
++//-----------------------------------------------------------------------------
++// Initialize  -  assemble the DXR state object
++//-----------------------------------------------------------------------------
++bool RaytracingPipeline::Initialize(ID3D12Device5* device,
++    const std::vector<char>& dxilLibrary)
++{
++    if (!device || dxilLibrary.empty())
++    {
++        OutputDebugStringW(L"[RT] pipeline init: no device or empty DXIL\n");
++        return false;
++    }
++    if (!CreateGlobalRootSignature(device)) return false;
++    if (!CreateLocalRootSignature(device))  return false;
++
++    CD3DX12_STATE_OBJECT_DESC pso{ D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE };
++
++    // ---- DXIL library + exports --------------------------------------
++    auto* lib = pso.CreateSubobject<CD3DX12_DXIL_LIBRARY_SUBOBJECT>();
++    D3D12_SHADER_BYTECODE code{ dxilLibrary.data(), dxilLibrary.size() };
++    lib->SetDXILLibrary(&code);
++    lib->DefineExport(kRayGen);
++    lib->DefineExport(kMiss);
++    lib->DefineExport(kShadowMiss);
++    lib->DefineExport(kClosestHit);
++
++    // ---- hit group ----------------------------------------------------
++    auto* hit = pso.CreateSubobject<CD3DX12_HIT_GROUP_SUBOBJECT>();
++    hit->SetClosestHitShaderImport(kClosestHit);
++    hit->SetHitGroupExport(kHitGroup);
++    hit->SetHitGroupType(D3D12_HIT_GROUP_TYPE_TRIANGLES);
++
++    // ---- shader config (payload / attribute sizes) -------------------
++    auto* shaderConfig = pso.CreateSubobject<CD3DX12_RAYTRACING_SHADER_CONFIG_SUBOBJECT>();
++    shaderConfig->Config(kPayloadSize, kAttribSize);
++
++    // ---- local root signature + association to the hit group ---------
++    auto* localRoot = pso.CreateSubobject<CD3DX12_LOCAL_ROOT_SIGNATURE_SUBOBJECT>();
++    localRoot->SetRootSignature(m_localRootSig.Get());
++    auto* localAssoc = pso.CreateSubobject<CD3DX12_SUBOBJECT_TO_EXPORTS_ASSOCIATION_SUBOBJECT>();
++    localAssoc->SetSubobjectToAssociate(*localRoot);
++    localAssoc->AddExport(kHitGroup);
++
++    // ---- global root signature ---------------------------------------
++    auto* globalRoot = pso.CreateSubobject<CD3DX12_GLOBAL_ROOT_SIGNATURE_SUBOBJECT>();
++    globalRoot->SetRootSignature(m_globalRootSig.Get());
++
++    // ---- pipeline config (recursion depth) ---------------------------
++    auto* pipelineConfig = pso.CreateSubobject<CD3DX12_RAYTRACING_PIPELINE_CONFIG_SUBOBJECT>();
++    pipelineConfig->Config(kMaxRecursion);
++
++    if (FAILED(device->CreateStateObject(pso, IID_PPV_ARGS(&m_stateObject))))
++    {
++        OutputDebugStringW(L"[RT] CreateStateObject failed\n");
++        return false;
++    }
++    if (FAILED(m_stateObject.As(&m_props)))
++    {
++        OutputDebugStringW(L"[RT] query state object properties failed\n");
++        return false;
++    }
++
++    OutputDebugStringW(L"[RT] raytracing state object created\n");
++    return true;
++}
++
++//-----------------------------------------------------------------------------
++// GetShaderIdentifier
++//-----------------------------------------------------------------------------
++const void* RaytracingPipeline::GetShaderIdentifier(const wchar_t* exportName) const
++{
++    if (!m_props) return nullptr;
++    return m_props->GetShaderIdentifier(exportName);
++}
+diff --git a/SourceCode/RHI/RaytracingPipeline.h b/SourceCode/RHI/RaytracingPipeline.h
+new file mode 100644
+index 0000000..21c7b52
+--- /dev/null
++++ b/SourceCode/RHI/RaytracingPipeline.h
+@@ -0,0 +1,59 @@
++#pragma once
++#include <d3d12.h>
++#include <wrl/client.h>
++#include <vector>
++
++using Microsoft::WRL::ComPtr;
++
++//-----------------------------------------------------------------------------
++// RaytracingPipeline
++//  Wraps an ID3D12StateObject (the DXR "pipeline") plus its root signatures.
++//
++//  The state object is assembled from these subobjects:
++//    - DXIL library (compiled PathTrace.hlsl) exporting the shader functions
++//    - a hit group binding the closest-hit shader
++//    - shader config  : payload / attribute byte sizes
++//    - local root sig  : per-hit-record data (vertex buffer, index buffer, color)
++//    - global root sig : output UAV table, TLAS SRV, scene CBV
++//    - pipeline config : max ray recursion depth
++//
++//  Shader export names (must match [shader("...")] functions in the .hlsl):
++//    RayGen / Miss / ShadowMiss / ClosestHit, hit group "HitGroup".
++//-----------------------------------------------------------------------------
++class RaytracingPipeline
++{
++public:
++    // Export / hit-group names, shared with the shader-binding-table builder.
++    static constexpr const wchar_t* kRayGen     = L"RayGen";
++    static constexpr const wchar_t* kMiss       = L"Miss";
++    static constexpr const wchar_t* kShadowMiss = L"ShadowMiss";
++    static constexpr const wchar_t* kClosestHit = L"ClosestHit";
++    static constexpr const wchar_t* kHitGroup   = L"HitGroup";
++
++    RaytracingPipeline() = default;
++    ~RaytracingPipeline() = default;
++
++    RaytracingPipeline(const RaytracingPipeline&) = delete;
++    RaytracingPipeline& operator=(const RaytracingPipeline&) = delete;
++
++    // Build the state object from a compiled DXIL library blob.
++    bool Initialize(ID3D12Device5* device, const std::vector<char>& dxilLibrary);
++
++    bool IsValid() const { return m_stateObject != nullptr; }
++
++    ID3D12StateObject*   GetStateObject()  const { return m_stateObject.Get(); }
++    ID3D12RootSignature* GetGlobalRootSig() const { return m_globalRootSig.Get(); }
++
++    // Shader identifier (32 bytes) for a given export name, used to fill the
++    // shader binding table. Returns nullptr if the state object is invalid.
++    const void* GetShaderIdentifier(const wchar_t* exportName) const;
++
++private:
++    bool CreateGlobalRootSignature(ID3D12Device5* device);
++    bool CreateLocalRootSignature(ID3D12Device5* device);
++
++    ComPtr<ID3D12StateObject>           m_stateObject;
++    ComPtr<ID3D12StateObjectProperties> m_props;
++    ComPtr<ID3D12RootSignature>         m_globalRootSig;
++    ComPtr<ID3D12RootSignature>         m_localRootSig;
++};
+-- 
+2.43.0
+
