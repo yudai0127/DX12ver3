@@ -67,16 +67,18 @@ private:
     };
 
     // Per-hit-record local root arguments (must match the local root signature
-    // order: vertex SRV, index SRV, base color constants).
+    // order: vertex SRV, index SRV, base-color constants + texture index).
     struct HitRecordData
     {
         D3D12_GPU_VIRTUAL_ADDRESS vbAddress = 0;
         D3D12_GPU_VIRTUAL_ADDRESS ibAddress = 0;
         DirectX::XMFLOAT4         baseColor = { 0.8f, 0.8f, 0.8f, 1.0f };
+        int                       baseColorTex = -1; // index into m_textureResources, or -1
     };
 
     bool BuildPipeline();
     bool BuildAccelerationStructures(Scene* scene);
+    bool BuildDescriptorHeap();       // output UAV + bindless base-color textures
     bool BuildShaderTable();
     bool CreateOutputResource(uint32_t width, uint32_t height);
 
@@ -103,12 +105,15 @@ private:
     UINT64 m_missOffset = 0;
     UINT64 m_hitOffset = 0;
 
-    // Output image (UAV) + its descriptor heap.
-    ComPtr<ID3D12Resource>      m_output;
-    DescriptorHeap              m_uavHeap;
-    D3D12_CPU_DESCRIPTOR_HANDLE m_outputUavCpu = {};
-    D3D12_GPU_DESCRIPTOR_HANDLE m_outputUavGpu = {};
-    bool                        m_uavAllocated = false;
+    // Output image (UAV) + bindless textures share one shader-visible heap:
+    //   slot 0      : output UAV (u0)
+    //   slots 1..T  : base-color texture SRVs (t3 array)
+    ComPtr<ID3D12Resource>          m_output;
+    DescriptorHeap                  m_srvUavHeap;
+    D3D12_CPU_DESCRIPTOR_HANDLE     m_outputUavCpu = {};
+    D3D12_GPU_DESCRIPTOR_HANDLE     m_outputUavGpu = {};
+    D3D12_GPU_DESCRIPTOR_HANDLE     m_textureTableGpu = {};
+    std::vector<ID3D12Resource*>    m_textureResources; // all models' textures, in order
 
     ConstantBuffer m_sceneCB;
 };

@@ -40,9 +40,11 @@ bool RaytracingRenderer::Initialize(Scene* scene, uint32_t width, uint32_t heigh
     }
 
     if (!BuildPipeline())                     return false;
-    if (!CreateOutputResource(width, height)) return false;
     if (!m_sceneCB.Initialize(sizeof(SceneConstants))) return false;
+    // AS build also collects the per-model texture list used by the heap below.
     if (!BuildAccelerationStructures(scene))  return false;
+    if (!BuildDescriptorHeap())               return false;
+    if (!CreateOutputResource(width, height)) return false;
     if (!BuildShaderTable())                  return false;
 
     m_valid = true;
@@ -106,6 +108,15 @@ bool RaytracingRenderer::BuildAccelerationStructures(Scene* scene)
         const auto& meshes = model->GetMeshes();
         const auto& materials = model->GetMaterials();
 
+        // Append this model's textures to the shared bindless array and remember
+        // where they start, so per-primitive texture indices can be offset.
+        const int texBase = static_cast<int>(m_textureResources.size());
+        {
+            std::vector<ID3D12Resource*> modelTex = model->GetTextureResourcesForRT();
+            m_textureResources.insert(
+                m_textureResources.end(), modelTex.begin(), modelTex.end());
+        }
+
         for (const auto& node : nodes)
         {
             if (node.mesh < 0 || (size_t)node.mesh >= meshes.size()) continue;
@@ -142,7 +153,15 @@ bool RaytracingRenderer::BuildAccelerationStructures(Scene* scene)
                 hd.vbAddress = prim.vbView.BufferLocation;
                 hd.ibAddress = prim.ibView.BufferLocation;
                 if (prim.material >= 0 && (size_t)prim.material < materials.size())
-                    hd.baseColor = materials[prim.material].basecolor_factor;
+                {
+                    const auto& mat = materials[prim.material];
+                    hd.baseColor = mat.basecolor_factor;
+                    // basecolor_texture indexes this model's textures; offset it
+                    // into the shared bindless array.
+                    hd.baseColorTex = (mat.basecolor_texture >= 0)
+                        ? texBase + mat.basecolor_texture
+                        : -1;
+                }
                 m_hitData.push_back(hd);
 
                 m_blas.push_back(std::move(blas));
@@ -194,7 +213,8 @@ bool RaytracingRenderer::BuildShaderTable()
 
     const UINT raygenStride = (UINT)Align(kShaderIdSize, kRecordAlign);          // 32
     m_missStride = (UINT)Align(kShaderIdSize, kRecordAlign);                     // 32
-    m_hitStride  = (UINT)Align(kShaderIdSize + 8 + 8 + 16, kRecordAlign);        // 64
+    // hit record: shaderId + vbVA(8) + ibVA(8) + baseColor(16) + texIndex(4)
+    m_hitStride  = (UINT)Align(kShaderIdSize + 8 + 8 + 16 + 4, kRecordAlign);    // 96
 
     m_raygenRegionSize = raygenStride;
     m_missRegionSize   = numMiss * m_missStride;
@@ -231,6 +251,52 @@ bool RaytracingRenderer::BuildShaderTable()
         memcpy(args + 0,  &m_hitData[i].vbAddress, sizeof(D3D12_GPU_VIRTUAL_ADDRESS));
         memcpy(args + 8,  &m_hitData[i].ibAddress, sizeof(D3D12_GPU_VIRTUAL_ADDRESS));
         memcpy(args + 16, &m_hitData[i].baseColor, sizeof(XMFLOAT4));
+        memcpy(args + 32, &m_hitData[i].baseColorTex, sizeof(int)); // b1: texture index
+    }
+    return true;
+}
+
+//-----------------------------------------------------------------------------
+// BuildDescriptorHeap  -  one shader-visible heap shared by the ray tracer:
+//   slot 0      : output UAV (u0)          -> filled by CreateOutputResource
+//   slots 1..T  : base-color texture SRVs  -> t3 bindless array
+//   Must run after BuildAccelerationStructures (which fills m_textureResources).
+//-----------------------------------------------------------------------------
+bool RaytracingRenderer::BuildDescriptorHeap()
+{
+    auto* dm = DeviceManager::Instance();
+    ID3D12Device* device = dm->GetDevice();
+
+    const UINT texCount = static_cast<UINT>(m_textureResources.size());
+    if (!m_srvUavHeap.Initialize(device, 1 + texCount, /*shaderVisible*/ true))
+    {
+        OutputDebugStringW(L"[RT] descriptor heap init failed\n");
+        return false;
+    }
+
+    // slot 0: reserve for the output UAV (view created in CreateOutputResource).
+    auto uavSlot = m_srvUavHeap.Allocate();
+    m_outputUavCpu = uavSlot.cpu;
+    m_outputUavGpu = uavSlot.gpu;
+
+    // slots 1..T: base-color texture SRVs. The texture table starts here even
+    // when there are no textures (the handle is then never dereferenced).
+    m_textureTableGpu = m_outputUavGpu;
+    for (UINT i = 0; i < texCount; ++i)
+    {
+        auto slot = m_srvUavHeap.Allocate();
+        if (i == 0) m_textureTableGpu = slot.gpu;
+
+        ID3D12Resource* res = m_textureResources[i];
+        if (!res) continue;
+
+        D3D12_RESOURCE_DESC rd = res->GetDesc();
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Format = rd.Format;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Texture2D.MipLevels = rd.MipLevels;
+        device->CreateShaderResourceView(res, &srv, slot.cpu);
     }
     return true;
 }
@@ -238,6 +304,8 @@ bool RaytracingRenderer::BuildShaderTable()
 //-----------------------------------------------------------------------------
 // CreateOutputResource  -  UAV image the ray generation shader writes to.
 //   Format matches the back buffer so it can be CopyResource'd directly.
+//   The descriptor slot is owned by BuildDescriptorHeap; here we (re)create the
+//   texture and (re)write the UAV into that fixed slot (also used on resize).
 //-----------------------------------------------------------------------------
 bool RaytracingRenderer::CreateOutputResource(uint32_t width, uint32_t height)
 {
@@ -268,17 +336,6 @@ bool RaytracingRenderer::CreateOutputResource(uint32_t width, uint32_t height)
         return false;
     }
     m_output->SetName(L"RT_Output");
-
-    // Allocate the UAV descriptor once and reuse the slot on resize.
-    if (!m_uavAllocated)
-    {
-        if (!m_uavHeap.IsValid())
-            m_uavHeap.Initialize(device, 4, /*shaderVisible*/ true);
-        auto handle = m_uavHeap.Allocate();
-        m_outputUavCpu = handle.cpu;
-        m_outputUavGpu = handle.gpu;
-        m_uavAllocated = true;
-    }
 
     D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {};
     uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
@@ -334,12 +391,13 @@ void RaytracingRenderer::Render(const Camera& camera)
     m_sceneCB.Update(sc);
 
     // ---- bind and dispatch -------------------------------------------
-    ID3D12DescriptorHeap* heaps[] = { m_uavHeap.GetHeap() };
+    ID3D12DescriptorHeap* heaps[] = { m_srvUavHeap.GetHeap() };
     cmd4->SetDescriptorHeaps(1, heaps);
     cmd4->SetComputeRootSignature(m_pipeline.GetGlobalRootSig());
-    cmd4->SetComputeRootDescriptorTable(0, m_outputUavGpu);
-    cmd4->SetComputeRootShaderResourceView(1, m_tlas.Address());
-    cmd4->SetComputeRootConstantBufferView(2, m_sceneCB.GetGpuAddress());
+    cmd4->SetComputeRootDescriptorTable(0, m_outputUavGpu);      // u0 output
+    cmd4->SetComputeRootShaderResourceView(1, m_tlas.Address()); // t0 TLAS
+    cmd4->SetComputeRootConstantBufferView(2, m_sceneCB.GetGpuAddress()); // b0 scene
+    cmd4->SetComputeRootDescriptorTable(3, m_textureTableGpu);   // t3 textures
     cmd4->SetPipelineState1(m_pipeline.GetStateObject());
 
     const D3D12_GPU_VIRTUAL_ADDRESS sbt = m_shaderTable->GetGPUVirtualAddress();

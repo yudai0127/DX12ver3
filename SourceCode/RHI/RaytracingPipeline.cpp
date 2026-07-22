@@ -26,7 +26,15 @@ bool RaytracingPipeline::CreateGlobalRootSignature(ID3D12Device5* device)
     uavRange.RegisterSpace = 0;
     uavRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
-    D3D12_ROOT_PARAMETER params[3] = {};
+    // Unbounded base-color texture array (t3): one entry per glTF texture.
+    D3D12_DESCRIPTOR_RANGE texRange = {};
+    texRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    texRange.NumDescriptors = UINT_MAX;   // unbounded (dynamic indexing)
+    texRange.BaseShaderRegister = 3;      // t3
+    texRange.RegisterSpace = 0;
+    texRange.OffsetInDescriptorsFromTableStart = 0;
+
+    D3D12_ROOT_PARAMETER params[4] = {};
     // param0: UAV table
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     params[0].DescriptorTable.NumDescriptorRanges = 1;
@@ -42,10 +50,33 @@ bool RaytracingPipeline::CreateGlobalRootSignature(ID3D12Device5* device)
     params[2].Descriptor.ShaderRegister = 0; // b0
     params[2].Descriptor.RegisterSpace = 0;
     params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    // param3: base-color texture table (t3, unbounded)
+    params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[3].DescriptorTable.NumDescriptorRanges = 1;
+    params[3].DescriptorTable.pDescriptorRanges = &texRange;
+    params[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    // Static sampler s0 (linear, wrap) for texture sampling.
+    D3D12_STATIC_SAMPLER_DESC sampler = {};
+    sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    sampler.MipLODBias = 0.0f;
+    sampler.MaxAnisotropy = 1;
+    sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+    sampler.BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_BLACK;
+    sampler.MinLOD = 0.0f;
+    sampler.MaxLOD = D3D12_FLOAT32_MAX;
+    sampler.ShaderRegister = 0; // s0
+    sampler.RegisterSpace = 0;
+    sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     D3D12_ROOT_SIGNATURE_DESC desc = {};
     desc.NumParameters = _countof(params);
     desc.pParameters = params;
+    desc.NumStaticSamplers = 1;
+    desc.pStaticSamplers = &sampler;
     desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
 
     ComPtr<ID3DBlob> blob, err;
@@ -86,11 +117,12 @@ bool RaytracingPipeline::CreateLocalRootSignature(ID3D12Device5* device)
     params[1].Descriptor.ShaderRegister = 2; // t2
     params[1].Descriptor.RegisterSpace = 0;
     params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    // param2: base color as 4 root constants (b1)
+    // param2: base color (4 floats) + base-color texture index (1 int) as
+    //         5 root constants (b1)
     params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     params[2].Constants.ShaderRegister = 1; // b1
     params[2].Constants.RegisterSpace = 0;
-    params[2].Constants.Num32BitValues = 4;
+    params[2].Constants.Num32BitValues = 5;
     params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     D3D12_ROOT_SIGNATURE_DESC desc = {};

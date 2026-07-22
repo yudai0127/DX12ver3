@@ -130,6 +130,10 @@ public:
 
     static UINT VertexStride() { return sizeof(Vertex); }
 
+    // Texture resources (one per glTF texture, in bindless order) for DXR.
+    // Falls back to a dummy white texture where an image is missing.
+    std::vector<ID3D12Resource*> GetTextureResourcesForRT() const;
+
 private:
     bool CreateRootSignature(ID3D12Device* device);
     bool CreatePipelineState(ID3D12Device* device, DXGI_FORMAT rtvFormat);

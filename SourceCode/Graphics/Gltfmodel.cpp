@@ -582,3 +582,25 @@ void GltfModel::Render(ID3D12GraphicsCommandList* commandList,
     for (int nodeIndex : m_scenes.at(m_defaultScene).nodes)
         traverse(nodeIndex);
 }
+
+//-----------------------------------------------------------------------------
+// GetTextureResourcesForRT  -  texture resources in bindless order for DXR.
+//   Mirrors BuildResourceTable's selection: dummy white where an image is
+//   missing, so the returned list has exactly one entry per glTF texture.
+//-----------------------------------------------------------------------------
+std::vector<ID3D12Resource*> GltfModel::GetTextureResourcesForRT() const
+{
+    std::vector<ID3D12Resource*> out;
+    out.reserve(m_textures.size());
+    for (const auto& t : m_textures)
+    {
+        const int imageIndex = t.source;
+        const Texture* tex =
+            (imageIndex > -1 && (size_t)imageIndex < m_images.size()
+                && m_images[imageIndex] && m_images[imageIndex]->IsValid())
+            ? m_images[imageIndex].get()
+            : m_dummyWhite.get();
+        out.push_back(tex ? tex->GetResource() : nullptr);
+    }
+    return out;
+}

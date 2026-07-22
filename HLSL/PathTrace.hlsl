@@ -1,8 +1,7 @@
 //=============================================================================
-// PathTrace.hlsl  (DXR milestone 1)
+// PathTrace.hlsl  (DXR milestone 1 + base-color textures)
 //   Primary rays through the camera + hard shadows from the directional light,
-//   traced against the scene TLAS. This is the foundation the path tracer
-//   (multi-bounce, accumulation) will build on.
+//   with the glTF base-color texture sampled at the hit point.
 //
 //   Exports (must match RaytracingPipeline export names):
 //     RayGen / Miss / ShadowMiss / ClosestHit  (hit group "HitGroup")
@@ -31,10 +30,18 @@ cbuffer SceneCB : register(b0)
     uint4  frame;
 };
 
+// Bindless base-color textures (one per glTF texture, all models concatenated).
+Texture2D    gTextures[] : register(t3);
+SamplerState gSampler    : register(s0);
+
 //---- local root signature (per hit record) ----------------------------------
 StructuredBuffer<Vertex> gVertices : register(t1);
 StructuredBuffer<uint>   gIndices  : register(t2);
-cbuffer HitCB : register(b1) { float4 gBaseColor; }
+cbuffer HitCB : register(b1)
+{
+    float4 gBaseColor;    // basecolor_factor
+    int    gBaseColorTex; // index into gTextures[], or -1 if none
+};
 
 //---- ray payloads -----------------------------------------------------------
 struct Payload
@@ -109,8 +116,8 @@ void ShadowMiss(inout ShadowPayload s)
 }
 
 //-----------------------------------------------------------------------------
-// Closest hit: interpolate the normal, apply a directional light with a
-// traced shadow ray, and add ambient.
+// Closest hit: interpolate normal + uv, sample the base-color texture, apply a
+// directional light with a traced shadow ray, and add ambient.
 //-----------------------------------------------------------------------------
 [shader("closesthit")]
 void ClosestHit(inout Payload payload,
@@ -131,7 +138,15 @@ void ClosestHit(inout Payload payload,
     float3 nObj = normalize(v0.normal * bc.x + v1.normal * bc.y + v2.normal * bc.z);
     float3 nWorld = normalize(mul((float3x3)ObjectToWorld3x4(), nObj));
 
+    float2 uv = v0.texcoord * bc.x + v1.texcoord * bc.y + v2.texcoord * bc.z;
+
     float3 hitPos = WorldRayOrigin() + RayTCurrent() * WorldRayDirection();
+
+    // Base color: factor, optionally modulated by the base-color texture.
+    // Ray tracing has no automatic derivatives, so sample an explicit LOD 0.
+    float4 base = gBaseColor;
+    if (gBaseColorTex >= 0)
+        base *= gTextures[gBaseColorTex].SampleLevel(gSampler, uv, 0);
 
     // Directional light: lightDir is the travel direction, so L points back to it.
     float3 L = normalize(-lightDir.xyz);
@@ -154,9 +169,8 @@ void ClosestHit(inout Payload payload,
         shadow = sp.visible;
     }
 
-    float3 base = gBaseColor.rgb;
-    float3 lit = base * lightColor.rgb * (ndotl * shadow);
-    float3 amb = base * ambient.rgb;
+    float3 lit = base.rgb * lightColor.rgb * (ndotl * shadow);
+    float3 amb = base.rgb * ambient.rgb;
 
     payload.color = lit + amb;
     payload.hitT = RayTCurrent();
