@@ -110,13 +110,17 @@ float3 sampleCone(float3 dir, float cosThetaMax, inout uint s)
 float3 skyColor(float3 d)
 {
     float t = saturate(d.y * 0.5f + 0.5f);
-    return lerp(float3(0.05f, 0.06f, 0.09f), float3(0.40f, 0.60f, 0.90f), t);
+    // Dimmer sky so GI fill light doesn't wash out the scene.
+    return lerp(float3(0.03f, 0.04f, 0.06f), float3(0.25f, 0.38f, 0.55f), t);
 }
 
 float3 tonemap(float3 c)
 {
-    c = c / (1.0f + c);              // Reinhard
-    return pow(saturate(c), 1.0f / 2.2f); // gamma for the UNORM back buffer
+    // ACES filmic (Narkowicz) for punchier contrast, then gamma for the UNORM
+    // back buffer.
+    const float a = 2.51f, b = 0.03f, cc = 2.43f, d = 0.59f, e = 0.14f;
+    c = saturate((c * (a * c + b)) / (c * (cc * c + d) + e));
+    return pow(c, 1.0f / 2.2f);
 }
 
 //---- shadow ray -------------------------------------------------------------
@@ -180,8 +184,8 @@ void RayGen()
                 PBR_DirectLight(N, V, Ls, p.albedo, p.metallic, p.roughness, lightColor.rgb) * vis;
         }
 
-        // A little constant ambient so unlit indirect areas are not pure black.
-        radiance += throughput * p.albedo * ambient.rgb * (1.0f - p.metallic);
+        // (No explicit ambient term: indirect bounces gather the sky/GI, so
+        //  adding a constant ambient here would double-count and wash it out.)
 
         // ---- indirect bounce: pick a diffuse or specular lobe -------------
         float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), p.albedo, p.metallic);
