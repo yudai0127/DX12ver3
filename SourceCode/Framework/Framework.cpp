@@ -117,6 +117,7 @@ void Framework::Render(float elapsedTime)
         ImGui::Text("RT instances: %zu", m_raytracer.GetInstanceCount());
         ImGui::SliderInt("RT Path Depth", &m_raytracer.maxBounces, 1, 8);
         ImGui::Text("Accumulated: %u spp", m_raytracer.GetAccumulatedSamples());
+        ImGui::SliderFloat("RT Exposure", &m_raytracer.exposure, 0.05f, 2.0f);
     }
     else
     {

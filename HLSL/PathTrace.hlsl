@@ -116,6 +116,8 @@ float3 skyColor(float3 d)
 
 float3 tonemap(float3 c)
 {
+    c *= ambient.w; // exposure (driven by the UI slider)
+
     // ACES filmic (Narkowicz) for punchier contrast, then gamma for the UNORM
     // back buffer.
     const float a = 2.51f, b = 0.03f, cc = 2.43f, d = 0.59f, e = 0.14f;
@@ -197,8 +199,11 @@ void RayGen()
         if (rnd(s) < pSpec)
         {
             // Glossy reflection: perturb the mirror direction by roughness.
+            // Use roughness^2 so smooth surfaces stay near-mirror sharp while
+            // rough ones blur out.
             float3 R = reflect(dir, N);
-            float cosMax = lerp(0.9998f, 0.55f, p.roughness);
+            float a2 = p.roughness * p.roughness;
+            float cosMax = lerp(0.99999f, 0.60f, a2);
             newDir = sampleCone(R, cosMax, s);
             if (dot(newDir, N) <= 0.0f) break;
             throughput *= F / pSpec;

@@ -510,6 +510,7 @@ void RaytracingRenderer::Render(const Camera& camera)
     sc.lightColor = XMFLOAT4(camera.lightColor.x * li, camera.lightColor.y * li,
                              camera.lightColor.z * li, camera.lightColor.w);
     sc.ambient = camera.ambient;
+    sc.ambient.w = exposure; // pass exposure to the tonemapper (ambient.rgb unused)
 
     // Reset accumulation whenever anything that changes the image changes.
     const int depth = (maxBounces < 1) ? 1 : (maxBounces > 8 ? 8 : maxBounces);

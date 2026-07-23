@@ -58,6 +58,9 @@ public:
     // global illumination. Clamped to [1, 8]. Adjustable from the UI.
     int maxBounces = 3;
 
+    // Tonemap exposure multiplier (post-process; does not reset accumulation).
+    float exposure = 0.6f;
+
     // Number of accumulated samples-per-pixel since the last reset (for the UI).
     uint32_t GetAccumulatedSamples() const { return m_accumIndex; }
 
