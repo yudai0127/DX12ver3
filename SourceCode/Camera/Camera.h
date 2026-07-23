@@ -45,9 +45,9 @@ public:
     float             fovDegree = 30.0f;                  // 視野角
     float             nearZ = 0.01f;                  // 手前の表示限界（小さめでめり込み緩和）
     float             farZ = 400.0f;                 // 奥の表示限界（広めにして遠い/大きいモデルに対応）
-    DirectX::XMFLOAT4 lightDir = { 0.0f, -1.0f, 1.0f, 0.0f }; // ライト方向
+    DirectX::XMFLOAT4 lightDir = { 1.0f, -1.0f, -1.0f, 0.0f }; // ライト方向
     DirectX::XMFLOAT4 lightColor = { 1.0f, 1.0f, 1.0f, 1.0f };  // ライト色
-    float             lightIntensity = 1.0f;                     // light strength multiplier
+    float             lightIntensity = 3.0f;                     // light strength multiplier
     DirectX::XMFLOAT4 ambient = { 0.2f, 0.2f, 0.2f, 1.0f };  // 環境光
 
     /// @brief シーン定数バッファのGPUアドレス（Mesh::Render に渡す）
