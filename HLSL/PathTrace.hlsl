@@ -114,12 +114,27 @@ float3 skyColor(float3 d)
     return lerp(float3(0.03f, 0.04f, 0.06f), float3(0.25f, 0.38f, 0.55f), t);
 }
 
+//float3 tonemap(float3 c)
+//{
+//    // ACES filmic (Narkowicz) for punchier contrast, then gamma for the UNORM
+//    // back buffer.
+//    const float a = 2.51f, b = 0.03f, cc = 2.43f, d = 0.59f, e = 0.14f;
+//    c = saturate((c * (a * c + b)) / (c * (cc * c + d) + e));
+//    return pow(c, 1.0f / 2.2f);
+//}
 float3 tonemap(float3 c)
 {
+    // 露出(Exposure)を調整して全体を暗くします。
+    // 1.0が元の明るさです。0.5などに下げると暗くなります。
+    float exposure = 0.6f;
+    c *= exposure;
+
     // ACES filmic (Narkowicz) for punchier contrast, then gamma for the UNORM
     // back buffer.
     const float a = 2.51f, b = 0.03f, cc = 2.43f, d = 0.59f, e = 0.14f;
     c = saturate((c * (a * c + b)) / (c * (cc * c + d) + e));
+    
+    // ガンマ補正
     return pow(c, 1.0f / 2.2f);
 }
 
