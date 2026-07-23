@@ -54,6 +54,7 @@ struct Payload
 {
     float3 color;
     float  hitT;
+    uint   depth;  // reflection bounce index (0 = primary ray)
 };
 
 struct ShadowPayload
@@ -90,6 +91,7 @@ void RayGen()
     Payload payload;
     payload.color = float3(0, 0, 0);
     payload.hitT = -1.0f;
+    payload.depth = 0;
 
     TraceRay(gScene, RAY_FLAG_NONE, 0xFF, 0, 0, /*MissShaderIndex*/ 0, ray, payload);
 
@@ -200,7 +202,34 @@ void ClosestHit(inout Payload payload,
     float3 direct = PBR_DirectLight(N, V, L, base.rgb, metallic, roughness,
                                     lightColor.rgb) * shadow;
     float3 amb = base.rgb * ambient.rgb * (1.0f - metallic);
+    float3 color = direct + amb;
 
-    payload.color = direct + amb;
+    // Ray-traced reflection: shoot a mirror ray and add the environment it
+    // sees, weighted by Fresnel. Smooth/metallic surfaces reflect strongly;
+    // rough surfaces barely do (no glossy blur yet).
+    uint maxBounces = frame.y;
+    if (payload.depth < maxBounces)
+    {
+        float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), base.rgb, metallic);
+        float  NdotV = saturate(dot(N, V));
+        float3 F = F0 + (1.0f - F0) * pow(saturate(1.0f - NdotV), 5.0f);
+
+        RayDesc rray;
+        rray.Origin = hitPos + N * 1e-2f;
+        rray.Direction = normalize(reflect(WorldRayDirection(), N));
+        rray.TMin = 1e-3f;
+        rray.TMax = 1e5f;
+
+        Payload rp;
+        rp.color = float3(0, 0, 0);
+        rp.hitT = -1.0f;
+        rp.depth = payload.depth + 1;
+        TraceRay(gScene, RAY_FLAG_NONE, 0xFF, 0, 0, /*MissShaderIndex*/ 0, rray, rp);
+
+        float sharp = 1.0f - roughness; // sharp reflections only when smooth
+        color += F * rp.color * sharp;
+    }
+
+    payload.color = color;
     payload.hitT = RayTCurrent();
 }

@@ -54,6 +54,10 @@ public:
     bool IsValid() const { return m_valid; }
     size_t GetInstanceCount() const { return m_hitData.size(); }
 
+    // Reflection bounce count (0 = reflections off). Clamped to the pipeline's
+    // recursion limit each frame. Adjustable from the UI.
+    int maxBounces = 2;
+
 private:
     // Scene constants passed to the ray generation / shading shaders (b0).
     struct SceneConstants

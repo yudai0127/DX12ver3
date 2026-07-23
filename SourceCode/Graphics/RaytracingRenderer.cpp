@@ -403,7 +403,10 @@ void RaytracingRenderer::Render(const Camera& camera)
     sc.lightColor = XMFLOAT4(camera.lightColor.x * li, camera.lightColor.y * li,
                              camera.lightColor.z * li, camera.lightColor.w);
     sc.ambient = camera.ambient;
-    sc.frame = XMUINT4(m_frameCounter++, 0, 0, 0);
+    // frame.x = frame counter, frame.y = reflection bounce count.
+    // Clamp to the pipeline's recursion budget (kMaxRecursion = 5 -> max 3).
+    const uint32_t bounces = (uint32_t)((maxBounces < 0) ? 0 : (maxBounces > 3 ? 3 : maxBounces));
+    sc.frame = XMUINT4(m_frameCounter++, bounces, 0, 0);
     m_sceneCB.Update(sc);
 
     // ---- bind and dispatch -------------------------------------------

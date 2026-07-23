@@ -7,9 +7,11 @@
 //   Payload : float3 color + float  hitT   = 16 bytes
 //   Attrib  : float2 barycentrics          = 8 bytes (built-in triangle attr)
 //-----------------------------------------------------------------------------
-static constexpr UINT kPayloadSize = 4 * sizeof(float); // 16
+static constexpr UINT kPayloadSize = 5 * sizeof(float); // float3 color + hitT + depth = 20
 static constexpr UINT kAttribSize  = 2 * sizeof(float); // 8
-static constexpr UINT kMaxRecursion = 2;                // primary + shadow
+// primary + reflection bounces + a shadow ray at the deepest level.
+// Supports up to (kMaxRecursion - 2) reflection bounces.
+static constexpr UINT kMaxRecursion = 5;
 
 //-----------------------------------------------------------------------------
 // Global root signature
