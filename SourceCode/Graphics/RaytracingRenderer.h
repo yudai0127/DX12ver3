@@ -54,6 +54,10 @@ public:
     bool IsValid() const { return m_valid; }
     size_t GetInstanceCount() const { return m_hitData.size(); }
 
+    // Render mode: 0 = raytracing (realtime, deterministic, no accumulation),
+    // 1 = path tracing (accumulating global illumination). Set by the app.
+    int renderMode = 0;
+
     // Path length (number of bounces). 1 = direct lighting only; higher adds
     // global illumination. Clamped to [1, 8]. Adjustable from the UI.
     int maxBounces = 3;
@@ -112,6 +116,7 @@ private:
         DirectX::XMFLOAT4 lightDir = {}, lightColor = {}, ambient = {};
         float             intensity = 0.0f;
         int               depth = 0;
+        int               mode = 0;
         uint32_t          w = 0, h = 0;
     } m_prevKey;
     bool m_hasPrevKey = false;

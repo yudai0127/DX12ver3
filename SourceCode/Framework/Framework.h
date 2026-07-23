@@ -78,7 +78,7 @@ private:
     Camera         m_camera;
 
     RaytracingRenderer m_raytracer;              // DXR path (optional)
-    bool               m_useRaytracing = false;  // toggle: raster vs raytracing
+    int                m_renderMode = 1;         // 0=Rasterizer 1=Raytracing 2=PathTracing
 
     std::vector<uint64_t> m_frameFenceValues;
     uint32_t              m_frameIndex = 0;

@@ -518,7 +518,7 @@ void RaytracingRenderer::Render(const Camera& camera)
     key.eye = camera.eye; key.focus = camera.focus; key.fov = camera.fovDegree;
     key.lightDir = camera.lightDir; key.lightColor = camera.lightColor;
     key.ambient = camera.ambient; key.intensity = camera.lightIntensity;
-    key.depth = depth; key.w = m_width; key.h = m_height;
+    key.depth = depth; key.mode = renderMode; key.w = m_width; key.h = m_height;
     if (!m_hasPrevKey || memcmp(&key, &m_prevKey, sizeof(ResetKey)) != 0)
     {
         m_accumIndex = 0;
@@ -526,8 +526,9 @@ void RaytracingRenderer::Render(const Camera& camera)
         m_hasPrevKey = true;
     }
 
-    // frame: x = per-frame RNG seed, y = path depth, z = prior sample count.
-    sc.frame = XMUINT4(m_frameCounter++, (uint32_t)depth, m_accumIndex, 0);
+    // frame: x = RNG seed, y = path depth, z = prior sample count, w = mode.
+    sc.frame = XMUINT4(m_frameCounter++, (uint32_t)depth, m_accumIndex,
+                       (uint32_t)renderMode);
     m_sceneCB.Update(sc);
 
     // ---- bind and dispatch -------------------------------------------

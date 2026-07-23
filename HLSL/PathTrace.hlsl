@@ -145,9 +145,11 @@ void RayGen()
     uint2 pix = DispatchRaysIndex().xy;
     uint2 dim = DispatchRaysDimensions().xy;
     uint  s = seedFrom(pix, frame.x);
+    uint  mode = frame.w;            // 0 = raytracing (realtime), 1 = path tracing
+    uint  maxDepth = max(frame.y, 1u);
 
-    // Sub-pixel jitter for anti-aliasing.
-    float2 jitter = float2(rnd(s), rnd(s)) - 0.5f;
+    // Sub-pixel jitter for AA (path tracing only; raytracing stays noise-free).
+    float2 jitter = (mode == 1u) ? (float2(rnd(s), rnd(s)) - 0.5f) : float2(0.0f, 0.0f);
     float2 uv = (float2(pix) + 0.5f + jitter) / float2(dim);
     float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
 
@@ -155,9 +157,50 @@ void RayGen()
     float3 origin = cameraPos.xyz;
     float3 dir = normalize(farW.xyz - origin);
 
+    //=====================================================================
+    // Raytracing mode: direct light + hard shadow + sharp mirror reflection.
+    // Deterministic (no random sampling), so it is clean every frame even
+    // while moving, and needs no accumulation.
+    //=====================================================================
+    if (mode == 0u)
+    {
+        float3 radiance = float3(0, 0, 0);
+        float3 tp = float3(1, 1, 1);
+        [loop]
+        for (uint b = 0; b < maxDepth; ++b)
+        {
+            RayDesc ray; ray.Origin = origin; ray.Direction = dir; ray.TMin = 1e-3f; ray.TMax = 1e5f;
+            Payload p; p.hitT = -1.0f;
+            TraceRay(gScene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, p);
+            if (p.hitT < 0.0f) { radiance += tp * skyColor(dir); break; }
+
+            float3 N = p.normal, V = -dir;
+            float3 L = normalize(-lightDir.xyz);
+            float ndotl = saturate(dot(N, L));
+            float vis = (ndotl > 0.0f) ? traceShadow(p.worldPos + N * 1e-2f, L) : 0.0f;
+            radiance += tp * PBR_DirectLight(N, V, L, p.albedo, p.metallic, p.roughness, lightColor.rgb) * vis;
+            radiance += tp * p.albedo * ambient.rgb * (1.0f - p.metallic); // ambient fill
+
+            // Continue along the sharp mirror direction, weighted by Fresnel
+            // and smoothness; rough surfaces stop (throughput -> ~0).
+            float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), p.albedo, p.metallic);
+            float NdotV = saturate(dot(N, V));
+            float3 F = F0 + (1.0f - F0) * pow(saturate(1.0f - NdotV), 5.0f);
+            tp *= F * (1.0f - p.roughness);
+            if (max(tp.r, max(tp.g, tp.b)) < 0.02f) break;
+
+            origin = p.worldPos + N * 1e-3f;
+            dir = reflect(dir, N);
+        }
+        gOutput[pix] = float4(tonemap(radiance), 1.0f);
+        return;
+    }
+
+    //=====================================================================
+    // Path tracing mode: full Monte-Carlo GI with temporal accumulation.
+    //=====================================================================
     float3 radiance = float3(0, 0, 0);
     float3 throughput = float3(1, 1, 1);
-    uint   maxDepth = max(frame.y, 1u);
 
     [loop]
     for (uint b = 0; b < maxDepth; ++b)
@@ -186,9 +229,6 @@ void RayGen()
                 PBR_DirectLight(N, V, Ls, p.albedo, p.metallic, p.roughness, lightColor.rgb) * vis;
         }
 
-        // (No explicit ambient term: indirect bounces gather the sky/GI, so
-        //  adding a constant ambient here would double-count and wash it out.)
-
         // ---- indirect bounce: pick a diffuse or specular lobe -------------
         float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), p.albedo, p.metallic);
         float  NdotV = saturate(dot(N, V));
@@ -198,9 +238,6 @@ void RayGen()
         float3 newDir;
         if (rnd(s) < pSpec)
         {
-            // Glossy reflection: perturb the mirror direction by roughness.
-            // Use roughness^2 so smooth surfaces stay near-mirror sharp while
-            // rough ones blur out.
             float3 R = reflect(dir, N);
             float a2 = p.roughness * p.roughness;
             float cosMax = lerp(0.99999f, 0.60f, a2);
@@ -217,7 +254,6 @@ void RayGen()
         origin = p.worldPos + N * 1e-3f;
         dir = newDir;
 
-        // Russian roulette after a few bounces.
         if (b >= 3u)
         {
             float q = max(throughput.r, max(throughput.g, throughput.b));

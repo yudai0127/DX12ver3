@@ -55,7 +55,7 @@ void Framework::Initialize()
     // app keeps using the rasterizer.
     if (m_raytracer.Initialize(m_scene.get(), m_config.width, m_config.height))
     {
-        m_useRaytracing = true; // default to the ray-traced view when available
+        m_renderMode = 1; // default to realtime raytracing (clean, no noise)
     }
 }
 
@@ -87,7 +87,7 @@ void Framework::Update(float elapsedTime)
         static bool prevF6 = false;
         bool nowF6 = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
         if (nowF6 && !prevF6)
-            m_useRaytracing = !m_useRaytracing;
+            m_renderMode = (m_renderMode + 1) % 3;
         prevF6 = nowF6;
     }
 
@@ -113,15 +113,21 @@ void Framework::Render(float elapsedTime)
     ImGui::Separator();
     if (m_raytracer.IsValid())
     {
-        ImGui::Checkbox("Use Raytracing (DXR) [F6]", &m_useRaytracing);
-        ImGui::Text("RT instances: %zu", m_raytracer.GetInstanceCount());
-        ImGui::SliderInt("RT Path Depth", &m_raytracer.maxBounces, 1, 8);
-        ImGui::Text("Accumulated: %u spp", m_raytracer.GetAccumulatedSamples());
-        ImGui::SliderFloat("RT Exposure", &m_raytracer.exposure, 0.05f, 2.0f);
+        const char* modes[] = { "Rasterizer", "Raytracing", "Path Tracing" };
+        ImGui::Combo("Render Mode [F6]", &m_renderMode, modes, 3);
+        if (m_renderMode != 0)
+        {
+            ImGui::Text("RT instances: %zu", m_raytracer.GetInstanceCount());
+            ImGui::SliderInt("RT Path Depth", &m_raytracer.maxBounces, 1, 8);
+            if (m_renderMode == 2)
+                ImGui::Text("Accumulated: %u spp", m_raytracer.GetAccumulatedSamples());
+            ImGui::SliderFloat("RT Exposure", &m_raytracer.exposure, 0.05f, 2.0f);
+        }
     }
     else
     {
         ImGui::TextDisabled("Raytracing (DXR): not available");
+        m_renderMode = 0;
     }
     ImGui::End();
 
@@ -159,9 +165,10 @@ void Framework::Render(float elapsedTime)
     const float clearColor[4] = { 0.2f, 0.2f, 0.2f, 1.0f };
     BeginFrame(clearColor);
 
-    if (m_useRaytracing && m_raytracer.IsValid())
+    if (m_renderMode != 0 && m_raytracer.IsValid())
     {
         // DXR: trace into an offscreen image and copy it into the back buffer.
+        m_raytracer.renderMode = (m_renderMode == 2) ? 1 : 0; // 1=path tracing
         m_raytracer.Render(m_camera);
     }
     else
