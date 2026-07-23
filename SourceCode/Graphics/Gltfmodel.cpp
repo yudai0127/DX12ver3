@@ -190,6 +190,16 @@ GltfModel::GltfModel(const std::string& filename)
 
             // ’¸“_”
             const auto& posAccessor = gltfModel.accessors.at(itPos->second);
+            // Local AABB from the POSITION accessor (used to place the RT floor).
+            if (posAccessor.minValues.size() == 3 && posAccessor.maxValues.size() == 3)
+            {
+                prim.aabbMin = { (float)posAccessor.minValues[0],
+                                 (float)posAccessor.minValues[1],
+                                 (float)posAccessor.minValues[2] };
+                prim.aabbMax = { (float)posAccessor.maxValues[0],
+                                 (float)posAccessor.maxValues[1],
+                                 (float)posAccessor.maxValues[2] };
+            }
             const size_t vertexCount = posAccessor.count;
             std::vector<Vertex> vertices(vertexCount);
 

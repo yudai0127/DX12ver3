@@ -104,6 +104,10 @@ private:
     RaytracingAccel::AccelBuffers              m_tlas;
     std::vector<HitRecordData>                 m_hitData;
 
+    // Procedural reflective floor geometry (kept alive for BLAS use).
+    ComPtr<ID3D12Resource> m_floorVB;
+    ComPtr<ID3D12Resource> m_floorIB;
+
     // Shader binding table (one upload buffer, mapped).
     ComPtr<ID3D12Resource> m_shaderTable;
     UINT m_raygenRegionSize = 0;

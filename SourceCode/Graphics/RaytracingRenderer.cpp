@@ -93,6 +93,10 @@ bool RaytracingRenderer::BuildAccelerationStructures(Scene* scene)
     std::vector<D3D12_RAYTRACING_INSTANCE_DESC> instances;
     UINT recordIndex = 0;
 
+    // Accumulate the scene's world-space bounds to place the reflective floor.
+    XMVECTOR sceneMin = XMVectorReplicate(1e30f);
+    XMVECTOR sceneMax = XMVectorReplicate(-1e30f);
+
     for (const auto& obj : scene->GetObjects())
     {
         if (!obj) continue;
@@ -166,6 +170,83 @@ bool RaytracingRenderer::BuildAccelerationStructures(Scene* scene)
                     hd.mrTex        = remap(mat.metallic_roughness_texture);
                     hd.normalTex    = remap(mat.normal_texture);
                 }
+                m_hitData.push_back(hd);
+
+                // Expand scene bounds by this primitive's transformed AABB.
+                XMVECTOR amn = XMLoadFloat3(&prim.aabbMin);
+                XMVECTOR amx = XMLoadFloat3(&prim.aabbMax);
+                for (int corner = 0; corner < 8; ++corner)
+                {
+                    XMVECTOR c = XMVectorSet(
+                        (corner & 1) ? XMVectorGetX(amx) : XMVectorGetX(amn),
+                        (corner & 2) ? XMVectorGetY(amx) : XMVectorGetY(amn),
+                        (corner & 4) ? XMVectorGetZ(amx) : XMVectorGetZ(amn), 1.0f);
+                    XMVECTOR w = XMVector3Transform(c, instM);
+                    sceneMin = XMVectorMin(sceneMin, w);
+                    sceneMax = XMVectorMax(sceneMax, w);
+                }
+
+                m_blas.push_back(std::move(blas));
+                ++recordIndex;
+            }
+        }
+    }
+
+    // ---- reflective floor -------------------------------------------
+    // A large mirror quad at the model's feet, so reflections are obvious.
+    if (recordIndex > 0)
+    {
+        XMFLOAT3 mn, mx;
+        XMStoreFloat3(&mn, sceneMin);
+        XMStoreFloat3(&mx, sceneMax);
+
+        const float y  = mn.y;                       // floor at the lowest point
+        const float cx = (mn.x + mx.x) * 0.5f;
+        const float cz = (mn.z + mx.z) * 0.5f;
+        const float dx = mx.x - mn.x;
+        const float dz = mx.z - mn.z;
+        float half = (dx > dz ? dx : dz) * 2.0f;     // extend well past the model
+        if (half < 100.0f) half = 100.0f;
+
+        auto setV = [](GltfModel::Vertex& v, float px, float py, float pz, float u, float w)
+        {
+            v.position = { px, py, pz };
+            v.normal   = { 0.0f, 1.0f, 0.0f };
+            v.tangent  = { 1.0f, 0.0f, 0.0f, 1.0f };
+            v.texcoord = { u, w };
+        };
+        GltfModel::Vertex fv[4];
+        setV(fv[0], cx - half, y, cz - half, 0.0f, 0.0f);
+        setV(fv[1], cx - half, y, cz + half, 0.0f, 1.0f);
+        setV(fv[2], cx + half, y, cz + half, 1.0f, 1.0f);
+        setV(fv[3], cx + half, y, cz - half, 1.0f, 0.0f);
+        const uint32_t fi[6] = { 0, 1, 2, 0, 2, 3 };
+
+        m_floorVB = GpuBuffer::CreateUploadWithData(fv, sizeof(fv));
+        m_floorIB = GpuBuffer::CreateUploadWithData(fi, sizeof(fi));
+        if (m_floorVB && m_floorIB)
+        {
+            auto blas = RaytracingAccel::BuildBottomLevel(dev5, cmd4,
+                m_floorVB->GetGPUVirtualAddress(), 4, sizeof(GltfModel::Vertex),
+                m_floorIB->GetGPUVirtualAddress(), 6);
+            if (blas.IsValid())
+            {
+                D3D12_RAYTRACING_INSTANCE_DESC inst = {};
+                inst.Transform[0][0] = 1.0f; // identity (verts already in world space)
+                inst.Transform[1][1] = 1.0f;
+                inst.Transform[2][2] = 1.0f;
+                inst.InstanceID = recordIndex;
+                inst.InstanceMask = 0xFF;
+                inst.InstanceContributionToHitGroupIndex = recordIndex;
+                inst.AccelerationStructure = blas.Address();
+                instances.push_back(inst);
+
+                HitRecordData hd;
+                hd.vbAddress = m_floorVB->GetGPUVirtualAddress();
+                hd.ibAddress = m_floorIB->GetGPUVirtualAddress();
+                hd.baseColor = { 0.55f, 0.55f, 0.60f, 1.0f };
+                hd.metallic = 1.0f;      // mirror-like
+                hd.roughness = 0.05f;
                 m_hitData.push_back(hd);
 
                 m_blas.push_back(std::move(blas));

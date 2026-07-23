@@ -74,6 +74,8 @@ public:
         uint32_t                 indexCount = 0;
         int                      material = -1;
         int                      has_tangent = 0;
+        DirectX::XMFLOAT3        aabbMin = { 0, 0, 0 }; // local bounds (RT floor)
+        DirectX::XMFLOAT3        aabbMax = { 0, 0, 0 };
 
         ConstantBuffer           objectCB; // オブジェクト定数(b0)
     };
