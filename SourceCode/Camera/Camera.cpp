@@ -31,7 +31,9 @@ void Camera::Update(float aspectRatio)
     XMStoreFloat4x4(&data.view_projection, V * P);
     data.camera_position = { eye.x, eye.y, eye.z, 1.0f };
     data.light_direction = lightDir;
-    data.light_color = lightColor;
+    data.light_color = { lightColor.x * lightIntensity,
+                         lightColor.y * lightIntensity,
+                         lightColor.z * lightIntensity, lightColor.w };
     data.ambient_color = ambient;
 
     m_sceneCB.Update(data);

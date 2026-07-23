@@ -109,6 +109,7 @@ void Framework::Render(float elapsedTime)
     ImGui::DragFloat3("Focus", &m_camera.focus.x, 0.1f);
     ImGui::DragFloat("FOV", &m_camera.fovDegree, 0.5f, 10.0f, 120.0f);
     ImGui::DragFloat3("Light", &m_camera.lightDir.x, 0.05f, -1.0f, 1.0f);
+    ImGui::DragFloat("Light Intensity", &m_camera.lightIntensity, 0.05f, 0.0f, 20.0f);
     ImGui::Separator();
     if (m_raytracer.IsValid())
     {

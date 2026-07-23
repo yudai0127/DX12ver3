@@ -398,7 +398,10 @@ void RaytracingRenderer::Render(const Camera& camera)
 
     sc.cameraPos = XMFLOAT4(camera.eye.x, camera.eye.y, camera.eye.z, 1.0f);
     sc.lightDir = camera.lightDir;
-    sc.lightColor = camera.lightColor;
+    // Scale the light colour by the intensity so the ImGui slider affects RT.
+    const float li = camera.lightIntensity;
+    sc.lightColor = XMFLOAT4(camera.lightColor.x * li, camera.lightColor.y * li,
+                             camera.lightColor.z * li, camera.lightColor.w);
     sc.ambient = camera.ambient;
     sc.frame = XMUINT4(m_frameCounter++, 0, 0, 0);
     m_sceneCB.Update(sc);
