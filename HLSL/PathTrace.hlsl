@@ -46,13 +46,15 @@ StructuredBuffer<Vertex> gVertices : register(t1);
 StructuredBuffer<uint>   gIndices  : register(t2);
 cbuffer HitCB : register(b1)
 {
-    float4 gBaseColor;
-    int    gBaseColorTex;
-    float  gMetallic;
-    float  gRoughness;
-    int    gMRTex;
-    int    gNormalTex;
-    float  gNormalScale;
+    float4 gBaseColor;    // dwords 0-3
+    float4 gEmissive;     // dwords 4-7  (.rgb = emissive_factor)
+    float  gMetallic;     // dword 8
+    float  gRoughness;    // dword 9
+    float  gNormalScale;  // dword 10
+    int    gBaseColorTex; // dword 11
+    int    gMRTex;        // dword 12
+    int    gNormalTex;    // dword 13
+    int    gEmissiveTex;  // dword 14
 };
 
 //---- payloads ---------------------------------------------------------------
@@ -62,6 +64,7 @@ struct Payload
     float3 albedo;
     float3 normal;
     float3 worldPos;
+    float3 emissive;
     float  metallic;
     float  roughness;
     float  hitT;      // < 0 : miss
@@ -174,6 +177,7 @@ void RayGen()
             TraceRay(gScene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, p);
             if (p.hitT < 0.0f) { radiance += tp * skyColor(dir); break; }
 
+            radiance += tp * p.emissive; // glowing surfaces
             float3 N = p.normal, V = -dir;
             float3 L = normalize(-lightDir.xyz);
             float ndotl = saturate(dot(N, L));
@@ -214,6 +218,8 @@ void RayGen()
             radiance += throughput * skyColor(dir);
             break;
         }
+
+        radiance += throughput * p.emissive; // glowing surfaces contribute + drive GI
 
         float3 N = p.normal;
         float3 V = -dir;
@@ -339,9 +345,14 @@ void ClosestHit(inout Payload payload,
         metallic *= mr.b;
     }
 
+    float3 emissive = gEmissive.rgb;
+    if (gEmissiveTex >= 0)
+        emissive *= gTextures[gEmissiveTex].SampleLevel(gSampler, uv, 0).rgb;
+
     payload.albedo = base.rgb;
     payload.normal = N;
     payload.worldPos = WorldRayOrigin() + RayTCurrent() * WorldRayDirection();
+    payload.emissive = emissive;
     payload.metallic = metallic;
     payload.roughness = clamp(roughness, 0.04f, 1.0f);
     payload.hitT = RayTCurrent();

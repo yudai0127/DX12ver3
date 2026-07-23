@@ -7,9 +7,9 @@
 //   Payload : float3 color + float  hitT   = 16 bytes
 //   Attrib  : float2 barycentrics          = 8 bytes (built-in triangle attr)
 //-----------------------------------------------------------------------------
-// Payload = albedo(12) + normal(12) + worldPos(12) + metallic(4) + roughness(4)
-// + hitT(4) = 48 bytes.
-static constexpr UINT kPayloadSize = 12 * sizeof(float); // 48
+// Payload = albedo(12) + normal(12) + worldPos(12) + emissive(12)
+// + metallic(4) + roughness(4) + hitT(4) = 60 bytes.
+static constexpr UINT kPayloadSize = 15 * sizeof(float); // 60
 static constexpr UINT kAttribSize  = 2 * sizeof(float);  // 8
 // The path tracer is iterative: every TraceRay (primary + shadow) is issued
 // from RayGen, so nesting never exceeds 1. Keep a small margin.
@@ -121,13 +121,14 @@ bool RaytracingPipeline::CreateLocalRootSignature(ID3D12Device5* device)
     params[1].Descriptor.ShaderRegister = 2; // t2
     params[1].Descriptor.RegisterSpace = 0;
     params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    // param2: PBR material constants (b1), 10x 32-bit values:
-    //   baseColor(4) + baseColorTex(1) + metallic(1) + roughness(1)
-    //   + mrTex(1) + normalTex(1) + normalScale(1)
+    // param2: PBR material constants (b1), 15x 32-bit values:
+    //   baseColor(4) + emissive(4) + metallic(1) + roughness(1)
+    //   + normalScale(1) + baseColorTex(1) + mrTex(1) + normalTex(1)
+    //   + emissiveTex(1)
     params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     params[2].Constants.ShaderRegister = 1; // b1
     params[2].Constants.RegisterSpace = 0;
-    params[2].Constants.Num32BitValues = 10;
+    params[2].Constants.Num32BitValues = 15;
     params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     D3D12_ROOT_SIGNATURE_DESC desc = {};

@@ -160,6 +160,7 @@ bool RaytracingRenderer::BuildAccelerationStructures(Scene* scene)
                 {
                     const auto& mat = materials[prim.material];
                     hd.baseColor = mat.basecolor_factor;
+                    hd.emissive = mat.emissive_factor;
                     hd.metallic = mat.metallic_factor;
                     hd.roughness = mat.roughness_factor;
                     hd.normalScale = mat.normal_scale;
@@ -169,6 +170,7 @@ bool RaytracingRenderer::BuildAccelerationStructures(Scene* scene)
                     hd.baseColorTex = remap(mat.basecolor_texture);
                     hd.mrTex        = remap(mat.metallic_roughness_texture);
                     hd.normalTex    = remap(mat.normal_texture);
+                    hd.emissiveTex  = remap(mat.emissive_texture);
                 }
                 m_hitData.push_back(hd);
 
@@ -298,10 +300,11 @@ bool RaytracingRenderer::BuildShaderTable()
 
     const UINT raygenStride = (UINT)Align(kShaderIdSize, kRecordAlign);          // 32
     m_missStride = (UINT)Align(kShaderIdSize, kRecordAlign);                     // 32
-    // hit record: shaderId + vbVA(8) + ibVA(8) + b1 constants(40)
-    //   b1 = baseColor(16) + texIdx(4) + metallic(4) + roughness(4)
-    //        + mrTex(4) + normalTex(4) + normalScale(4)
-    m_hitStride  = (UINT)Align(kShaderIdSize + 8 + 8 + 40, kRecordAlign);        // 96
+    // hit record: shaderId + vbVA(8) + ibVA(8) + b1 constants(60)
+    //   b1 = baseColor(16) + emissive(16) + metallic(4) + roughness(4)
+    //        + normalScale(4) + baseColorTex(4) + mrTex(4) + normalTex(4)
+    //        + emissiveTex(4)
+    m_hitStride  = (UINT)Align(kShaderIdSize + 8 + 8 + 60, kRecordAlign);        // 128
 
     m_raygenRegionSize = raygenStride;
     m_missRegionSize   = numMiss * m_missStride;
@@ -339,13 +342,15 @@ bool RaytracingRenderer::BuildShaderTable()
         memcpy(args + 8,  &m_hitData[i].ibAddress, sizeof(D3D12_GPU_VIRTUAL_ADDRESS));
         // b1 constants (must match HitCB layout in PathTrace.hlsl)
         uint8_t* cb = args + 16;
-        memcpy(cb + 0,  &m_hitData[i].baseColor,    sizeof(XMFLOAT4)); // 16
-        memcpy(cb + 16, &m_hitData[i].baseColorTex, sizeof(int));      // 4
-        memcpy(cb + 20, &m_hitData[i].metallic,     sizeof(float));    // 4
-        memcpy(cb + 24, &m_hitData[i].roughness,    sizeof(float));    // 4
-        memcpy(cb + 28, &m_hitData[i].mrTex,        sizeof(int));      // 4
-        memcpy(cb + 32, &m_hitData[i].normalTex,    sizeof(int));      // 4
-        memcpy(cb + 36, &m_hitData[i].normalScale,  sizeof(float));    // 4
+        memcpy(cb + 0,  &m_hitData[i].baseColor,    sizeof(XMFLOAT4)); // dwords 0-3
+        memcpy(cb + 16, &m_hitData[i].emissive,     sizeof(XMFLOAT3)); // dwords 4-6 (7=pad)
+        memcpy(cb + 32, &m_hitData[i].metallic,     sizeof(float));    // dword 8
+        memcpy(cb + 36, &m_hitData[i].roughness,    sizeof(float));    // dword 9
+        memcpy(cb + 40, &m_hitData[i].normalScale,  sizeof(float));    // dword 10
+        memcpy(cb + 44, &m_hitData[i].baseColorTex, sizeof(int));      // dword 11
+        memcpy(cb + 48, &m_hitData[i].mrTex,        sizeof(int));      // dword 12
+        memcpy(cb + 52, &m_hitData[i].normalTex,    sizeof(int));      // dword 13
+        memcpy(cb + 56, &m_hitData[i].emissiveTex,  sizeof(int));      // dword 14
     }
     return true;
 }

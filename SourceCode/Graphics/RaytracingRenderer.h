@@ -88,11 +88,13 @@ private:
         D3D12_GPU_VIRTUAL_ADDRESS ibAddress = 0;
         // PBR material (matches the b1 constant layout in PathTrace.hlsl).
         DirectX::XMFLOAT4         baseColor = { 0.8f, 0.8f, 0.8f, 1.0f };
+        DirectX::XMFLOAT3         emissive = { 0.0f, 0.0f, 0.0f };
         int                       baseColorTex = -1; // index into m_textureResources, or -1
         float                     metallic = 1.0f;
         float                     roughness = 1.0f;
         int                       mrTex = -1;
         int                       normalTex = -1;
+        int                       emissiveTex = -1;
         float                     normalScale = 1.0f;
     };
 
