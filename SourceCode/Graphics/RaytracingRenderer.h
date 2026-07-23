@@ -54,9 +54,12 @@ public:
     bool IsValid() const { return m_valid; }
     size_t GetInstanceCount() const { return m_hitData.size(); }
 
-    // Reflection bounce count (0 = reflections off). Clamped to the pipeline's
-    // recursion limit each frame. Adjustable from the UI.
-    int maxBounces = 2;
+    // Path length (number of bounces). 1 = direct lighting only; higher adds
+    // global illumination. Clamped to [1, 8]. Adjustable from the UI.
+    int maxBounces = 3;
+
+    // Number of accumulated samples-per-pixel since the last reset (for the UI).
+    uint32_t GetAccumulatedSamples() const { return m_accumIndex; }
 
 private:
     // Scene constants passed to the ray generation / shading shaders (b0).
@@ -95,7 +98,20 @@ private:
     bool     m_valid = false;
     uint32_t m_width = 0;
     uint32_t m_height = 0;
-    uint32_t m_frameCounter = 0;
+    uint32_t m_frameCounter = 0;  // ever-increasing; drives the per-frame RNG
+    uint32_t m_accumIndex = 0;    // samples accumulated since the last reset
+
+    // Snapshot of the inputs that, when changed, must reset accumulation.
+    struct ResetKey
+    {
+        DirectX::XMFLOAT3 eye = {}, focus = {};
+        float             fov = 0.0f;
+        DirectX::XMFLOAT4 lightDir = {}, lightColor = {}, ambient = {};
+        float             intensity = 0.0f;
+        int               depth = 0;
+        uint32_t          w = 0, h = 0;
+    } m_prevKey;
+    bool m_hasPrevKey = false;
 
     RaytracingPipeline m_pipeline;
 
@@ -122,10 +138,12 @@ private:
     // Output image (UAV) + bindless textures share one shader-visible heap:
     //   slot 0      : output UAV (u0)
     //   slots 1..T  : base-color texture SRVs (t3 array)
-    ComPtr<ID3D12Resource>          m_output;
+    ComPtr<ID3D12Resource>          m_output;   // LDR (back-buffer format), u0
+    ComPtr<ID3D12Resource>          m_accum;    // HDR accumulation (RGBA32F), u1
     DescriptorHeap                  m_srvUavHeap;
     D3D12_CPU_DESCRIPTOR_HANDLE     m_outputUavCpu = {};
-    D3D12_GPU_DESCRIPTOR_HANDLE     m_outputUavGpu = {};
+    D3D12_GPU_DESCRIPTOR_HANDLE     m_outputUavGpu = {}; // UAV table base (u0,u1)
+    D3D12_CPU_DESCRIPTOR_HANDLE     m_accumUavCpu = {};
     D3D12_GPU_DESCRIPTOR_HANDLE     m_textureTableGpu = {};
     std::vector<ID3D12Resource*>    m_textureResources; // all models' textures, in order
 

@@ -7,11 +7,13 @@
 //   Payload : float3 color + float  hitT   = 16 bytes
 //   Attrib  : float2 barycentrics          = 8 bytes (built-in triangle attr)
 //-----------------------------------------------------------------------------
-static constexpr UINT kPayloadSize = 5 * sizeof(float); // float3 color + hitT + depth = 20
-static constexpr UINT kAttribSize  = 2 * sizeof(float); // 8
-// primary + reflection bounces + a shadow ray at the deepest level.
-// Supports up to (kMaxRecursion - 2) reflection bounces.
-static constexpr UINT kMaxRecursion = 5;
+// Payload = albedo(12) + normal(12) + worldPos(12) + metallic(4) + roughness(4)
+// + hitT(4) = 48 bytes.
+static constexpr UINT kPayloadSize = 12 * sizeof(float); // 48
+static constexpr UINT kAttribSize  = 2 * sizeof(float);  // 8
+// The path tracer is iterative: every TraceRay (primary + shadow) is issued
+// from RayGen, so nesting never exceeds 1. Keep a small margin.
+static constexpr UINT kMaxRecursion = 2;
 
 //-----------------------------------------------------------------------------
 // Global root signature
@@ -23,8 +25,8 @@ bool RaytracingPipeline::CreateGlobalRootSignature(ID3D12Device5* device)
 {
     D3D12_DESCRIPTOR_RANGE uavRange = {};
     uavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    uavRange.NumDescriptors = 1;
-    uavRange.BaseShaderRegister = 0;      // u0
+    uavRange.NumDescriptors = 2;          // u0 output + u1 accumulation
+    uavRange.BaseShaderRegister = 0;      // u0..u1
     uavRange.RegisterSpace = 0;
     uavRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 

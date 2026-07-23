@@ -115,7 +115,8 @@ void Framework::Render(float elapsedTime)
     {
         ImGui::Checkbox("Use Raytracing (DXR) [F6]", &m_useRaytracing);
         ImGui::Text("RT instances: %zu", m_raytracer.GetInstanceCount());
-        ImGui::SliderInt("RT Reflect Bounces", &m_raytracer.maxBounces, 0, 3);
+        ImGui::SliderInt("RT Path Depth", &m_raytracer.maxBounces, 1, 8);
+        ImGui::Text("Accumulated: %u spp", m_raytracer.GetAccumulatedSamples());
     }
     else
     {

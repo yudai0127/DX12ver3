@@ -362,18 +362,22 @@ bool RaytracingRenderer::BuildDescriptorHeap()
     ID3D12Device* device = dm->GetDevice();
 
     const UINT texCount = static_cast<UINT>(m_textureResources.size());
-    if (!m_srvUavHeap.Initialize(device, 1 + texCount, /*shaderVisible*/ true))
+    // 2 UAVs (output u0 + accumulation u1) followed by the texture SRVs.
+    if (!m_srvUavHeap.Initialize(device, 2 + texCount, /*shaderVisible*/ true))
     {
         OutputDebugStringW(L"[RT] descriptor heap init failed\n");
         return false;
     }
 
-    // slot 0: reserve for the output UAV (view created in CreateOutputResource).
-    auto uavSlot = m_srvUavHeap.Allocate();
-    m_outputUavCpu = uavSlot.cpu;
-    m_outputUavGpu = uavSlot.gpu;
+    // slot 0: output UAV (u0), slot 1: accumulation UAV (u1). Views are created
+    // in CreateOutputResource; the UAV table base is slot 0.
+    auto outSlot = m_srvUavHeap.Allocate();
+    m_outputUavCpu = outSlot.cpu;
+    m_outputUavGpu = outSlot.gpu;
+    auto accSlot = m_srvUavHeap.Allocate();
+    m_accumUavCpu = accSlot.cpu;
 
-    // slots 1..T: base-color texture SRVs. The texture table starts here even
+    // slots 2..: base-color texture SRVs. The texture table starts here even
     // when there are no textures (the handle is then never dereferenced).
     m_textureTableGpu = m_outputUavGpu;
     for (UINT i = 0; i < texCount; ++i)
@@ -431,10 +435,32 @@ bool RaytracingRenderer::CreateOutputResource(uint32_t width, uint32_t height)
     }
     m_output->SetName(L"RT_Output");
 
+    // HDR accumulation image (same size, RGBA32F).
+    D3D12_RESOURCE_DESC ad = td;
+    ad.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    m_accum.Reset();
+    if (FAILED(device->CreateCommittedResource(
+        &heap, D3D12_HEAP_FLAG_NONE, &ad,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&m_accum))))
+    {
+        OutputDebugStringW(L"[RT] accumulation image creation failed\n");
+        return false;
+    }
+    m_accum->SetName(L"RT_Accum");
+
     D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {};
     uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
     uav.Format = fmt;
     device->CreateUnorderedAccessView(m_output.Get(), nullptr, &uav, m_outputUavCpu);
+
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uavA = {};
+    uavA.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    uavA.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    device->CreateUnorderedAccessView(m_accum.Get(), nullptr, &uavA, m_accumUavCpu);
+
+    // A new/resized accumulation image must start fresh.
+    m_accumIndex = 0;
+    m_hasPrevKey = false;
     return true;
 }
 
@@ -484,10 +510,23 @@ void RaytracingRenderer::Render(const Camera& camera)
     sc.lightColor = XMFLOAT4(camera.lightColor.x * li, camera.lightColor.y * li,
                              camera.lightColor.z * li, camera.lightColor.w);
     sc.ambient = camera.ambient;
-    // frame.x = frame counter, frame.y = reflection bounce count.
-    // Clamp to the pipeline's recursion budget (kMaxRecursion = 5 -> max 3).
-    const uint32_t bounces = (uint32_t)((maxBounces < 0) ? 0 : (maxBounces > 3 ? 3 : maxBounces));
-    sc.frame = XMUINT4(m_frameCounter++, bounces, 0, 0);
+
+    // Reset accumulation whenever anything that changes the image changes.
+    const int depth = (maxBounces < 1) ? 1 : (maxBounces > 8 ? 8 : maxBounces);
+    ResetKey key;
+    key.eye = camera.eye; key.focus = camera.focus; key.fov = camera.fovDegree;
+    key.lightDir = camera.lightDir; key.lightColor = camera.lightColor;
+    key.ambient = camera.ambient; key.intensity = camera.lightIntensity;
+    key.depth = depth; key.w = m_width; key.h = m_height;
+    if (!m_hasPrevKey || memcmp(&key, &m_prevKey, sizeof(ResetKey)) != 0)
+    {
+        m_accumIndex = 0;
+        m_prevKey = key;
+        m_hasPrevKey = true;
+    }
+
+    // frame: x = per-frame RNG seed, y = path depth, z = prior sample count.
+    sc.frame = XMUINT4(m_frameCounter++, (uint32_t)depth, m_accumIndex, 0);
     m_sceneCB.Update(sc);
 
     // ---- bind and dispatch -------------------------------------------
@@ -528,4 +567,7 @@ void RaytracingRenderer::Render(const Camera& camera)
         D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
     cmdCtx.ResourceBarrier(m_output.Get(),
         D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    // One more sample has been accumulated this frame.
+    ++m_accumIndex;
 }
