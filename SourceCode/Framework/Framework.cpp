@@ -40,7 +40,7 @@ void Framework::Initialize()
     // スプライトを表示
     GameObject* spriteObj = m_scene->CreateObject("Sprite");
     SpriteRenderer* sr =
-        spriteObj->AddComponent<SpriteRenderer>(L"Resources/ue.png");
+        spriteObj->AddComponent<SpriteRenderer>(L"Resources/ue.DDS");
     sr->SetPosition(50.0f, 50.0f);      // 画面上の位置
     sr->SetSize(200.0f, 200.0f);        // 表示サイズ
 
@@ -122,6 +122,7 @@ void Framework::Render(float elapsedTime)
             if (m_renderMode == 2)
                 ImGui::Text("Accumulated: %u spp", m_raytracer.GetAccumulatedSamples());
             ImGui::SliderFloat("RT Exposure", &m_raytracer.exposure, 0.05f, 2.0f);
+            ImGui::SliderFloat("Env Intensity", &m_raytracer.envIntensity, 0.0f, 5.0f);
         }
     }
     else

@@ -43,6 +43,28 @@ bool RaytracingRenderer::Initialize(Scene* scene, uint32_t width, uint32_t heigh
     if (!m_sceneCB.Initialize(sizeof(SceneConstants))) return false;
     // AS build also collects the per-model texture list used by the heap below.
     if (!BuildAccelerationStructures(scene))  return false;
+
+    // Optional equirectangular environment map. Drop an image at one of these
+    // paths (JPG/PNG, or a DDS converted from an .hdr with texconv). If none
+    // loads, the shader falls back to the procedural sky.
+    {
+        const wchar_t* candidates[] = {
+            L"Resources/env.dds", L"Resources/env.png", L"Resources/env.jpg"
+        };
+        for (const wchar_t* path : candidates)
+        {
+            auto tex = std::make_unique<Texture>();
+            if (tex->Load(path) && tex->IsValid())
+            {
+                m_envTexIndex = static_cast<int>(m_textureResources.size());
+                m_textureResources.push_back(tex->GetResource());
+                m_envTexture = std::move(tex);
+                OutputDebugStringW(L"[RT] environment map loaded\n");
+                break;
+            }
+        }
+    }
+
     if (!BuildDescriptorHeap())               return false;
     if (!CreateOutputResource(width, height)) return false;
     if (!BuildShaderTable())                  return false;
@@ -516,6 +538,7 @@ void RaytracingRenderer::Render(const Camera& camera)
                              camera.lightColor.z * li, camera.lightColor.w);
     sc.ambient = camera.ambient;
     sc.ambient.w = exposure; // pass exposure to the tonemapper (ambient.rgb unused)
+    sc.envParams = XMFLOAT4((float)m_envTexIndex, envIntensity, 0.0f, 0.0f);
 
     // Reset accumulation whenever anything that changes the image changes.
     const int depth = (maxBounces < 1) ? 1 : (maxBounces > 8 ? 8 : maxBounces);
@@ -523,6 +546,7 @@ void RaytracingRenderer::Render(const Camera& camera)
     key.eye = camera.eye; key.focus = camera.focus; key.fov = camera.fovDegree;
     key.lightDir = camera.lightDir; key.lightColor = camera.lightColor;
     key.ambient = camera.ambient; key.intensity = camera.lightIntensity;
+    key.envIntensity = envIntensity;
     key.depth = depth; key.mode = renderMode; key.w = m_width; key.h = m_height;
     if (!m_hasPrevKey || memcmp(&key, &m_prevKey, sizeof(ResetKey)) != 0)
     {

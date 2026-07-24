@@ -15,7 +15,7 @@ class Camera;
 class ModelRenderer : public Component
 {
 public:
-    /// @param filename モデルファイルパス（.gltf / .glb）
+    /// @param filename モデルファイルパス（.gltf / .glb）git am --abortgit reset --hard 7388b2f
     explicit ModelRenderer(const std::string& filename)
     {
         m_model = std::make_unique<GltfModel>(filename);

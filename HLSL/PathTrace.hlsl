@@ -35,7 +35,8 @@ cbuffer SceneCB : register(b0)
     float4 lightDir;    // direction the light travels toward
     float4 lightColor;
     float4 ambient;
-    uint4  frame;       // x=rng seed, y=maxDepth, z=accumIndex, w=unused
+    uint4  frame;       // x=rng seed, y=maxDepth, z=accumIndex, w=render mode
+    float4 envParams;   // x=env texture index (-1=none), y=intensity
 };
 
 Texture2D    gTextures[] : register(t3);
@@ -112,8 +113,17 @@ float3 sampleCone(float3 dir, float cosThetaMax, inout uint s)
 
 float3 skyColor(float3 d)
 {
+    // Equirectangular environment map when available.
+    int envIdx = (int)envParams.x;
+    if (envIdx >= 0)
+    {
+        float u = atan2(d.z, d.x) * (0.5f / PI) + 0.5f;
+        float v = acos(clamp(d.y, -1.0f, 1.0f)) / PI;
+        return gTextures[envIdx].SampleLevel(gSampler, float2(u, v), 0).rgb * envParams.y;
+    }
+
+    // Otherwise a simple procedural sky (dim so GI fill doesn't wash out).
     float t = saturate(d.y * 0.5f + 0.5f);
-    // Dimmer sky so GI fill light doesn't wash out the scene.
     return lerp(float3(0.03f, 0.04f, 0.06f), float3(0.25f, 0.38f, 0.55f), t);
 }
 

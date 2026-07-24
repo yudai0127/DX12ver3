@@ -4,10 +4,12 @@
 #include <wrl/client.h>
 #include <DirectXMath.h>
 #include <vector>
+#include <memory>
 #include "RHI/RaytracingPipeline.h"
 #include "RHI/RaytracingAccel.h"
 #include "RHI/DescriptorHeap.h"
 #include "RHI/ConstantBuffer.h"
+#include "Graphics/Texture.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -65,6 +67,9 @@ public:
     // Tonemap exposure multiplier (post-process; does not reset accumulation).
     float exposure = 0.6f;
 
+    // Environment map brightness (0 = use the environment as-is is x1).
+    float envIntensity = 1.0f;
+
     // Number of accumulated samples-per-pixel since the last reset (for the UI).
     uint32_t GetAccumulatedSamples() const { return m_accumIndex; }
 
@@ -78,6 +83,7 @@ private:
         DirectX::XMFLOAT4   lightColor;
         DirectX::XMFLOAT4   ambient;
         DirectX::XMUINT4    frame;
+        DirectX::XMFLOAT4   envParams; // x = env texture index (-1 = none), y = intensity
     };
 
     // Per-hit-record local root arguments (must match the local root signature
@@ -117,6 +123,7 @@ private:
         float             fov = 0.0f;
         DirectX::XMFLOAT4 lightDir = {}, lightColor = {}, ambient = {};
         float             intensity = 0.0f;
+        float             envIntensity = 0.0f;
         int               depth = 0;
         int               mode = 0;
         uint32_t          w = 0, h = 0;
@@ -156,6 +163,11 @@ private:
     D3D12_CPU_DESCRIPTOR_HANDLE     m_accumUavCpu = {};
     D3D12_GPU_DESCRIPTOR_HANDLE     m_textureTableGpu = {};
     std::vector<ID3D12Resource*>    m_textureResources; // all models' textures, in order
+
+    // Equirectangular environment map (optional). Appended to the texture
+    // array; m_envTexIndex is its index there (-1 = none, use procedural sky).
+    std::unique_ptr<Texture>        m_envTexture;
+    int                             m_envTexIndex = -1;
 
     ConstantBuffer m_sceneCB;
 };
