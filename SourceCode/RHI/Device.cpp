@@ -1,4 +1,5 @@
 #include "Device.h"
+#include "RHI/DLSS.h"
 #include <stdexcept>
 #include <cassert>
 
@@ -17,9 +18,17 @@ bool Device::Initialize(bool preferHighPerformance)
 {
     EnableDebugLayer();
 
+    // Streamline (DLSS) must be initialised before the D3D12 device exists so
+    // its interposer can hook the API. Failure here is non-fatal: the engine
+    // simply runs without DLSS.
+    DLSS::Instance().Startup();
+
     if (!CreateFactory())        return false;
     if (!SelectAdapter(preferHighPerformance)) return false;
     if (!CreateDevice())         return false;
+
+    DLSS::Instance().SetDevice(m_device.Get());
+    DLSS::Instance().QuerySupport();
 
     return true;
 }
@@ -29,6 +38,10 @@ bool Device::Initialize(bool preferHighPerformance)
 //-----------------------------------------------------------------------------
 void Device::Uninitialize()
 {
+    // Let Streamline release its own resources before the device goes away.
+    DLSS::Instance().Shutdown();
+
+    m_device5 = nullptr;   // the ID3D12Device5 view held a reference too
     m_device = nullptr;
     m_adapter = nullptr;
     m_factory = nullptr;
@@ -65,7 +78,9 @@ bool Device::CreateFactory()
     flags |= DXGI_CREATE_FACTORY_DEBUG;
 #endif
 
-    if (FAILED(CreateDXGIFactory2(flags, IID_PPV_ARGS(&m_factory))))
+    // Route through Streamline's interposer when present (falls back to
+    // the real DXGI when it is not); DLSS needs the proxied objects.
+    if (FAILED(DLSS::Instance().CreateFactory(flags, IID_PPV_ARGS(&m_factory))))
     {
         OutputDebugStringW(L"[DX12] IDXGIFactory6 ÇÃê∂ê¨Ç…é∏îsÇµÇ‹ÇµÇΩ\n");
         return false;
@@ -144,7 +159,7 @@ bool Device::CreateDevice()
 
     for (auto fl : featureLevels)
     {
-        if (SUCCEEDED(D3D12CreateDevice(
+        if (SUCCEEDED(DLSS::Instance().CreateDevice(
             m_adapter.Get(), fl, IID_PPV_ARGS(&m_device))))
         {
             wchar_t buf[256];

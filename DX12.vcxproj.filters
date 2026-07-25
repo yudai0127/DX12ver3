@@ -44,6 +44,7 @@
     <ClInclude Include="SourceCode\Core\FrameTimer.h" />
     <ClInclude Include="SourceCode\RHI\GpuTimer.h" />
     <ClInclude Include="SourceCode\Core\RenderStats.h" />
+    <ClInclude Include="SourceCode\RHI\DLSS.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="SourceCode\RHI\SwapChain.cpp" />
@@ -87,6 +88,7 @@
     <ClCompile Include="SourceCode\Graphics\RaytracingRenderer.cpp" />
     <ClCompile Include="SourceCode\Core\FrameTimer.cpp" />
     <ClCompile Include="SourceCode\RHI\GpuTimer.cpp" />
+    <ClCompile Include="SourceCode\RHI\DLSS.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="HLSL\Sprite.hlsli" />
@@ -94,6 +96,7 @@
     <None Include="HLSL\GltfModel.hlsli" />
     <None Include="HLSL\PBR.hlsli" />
     <None Include="HLSL\PathTrace.hlsl" />
+    <None Include="HLSL\Denoise_CS.hlsl" />
   </ItemGroup>
   <ItemGroup>
     <FxCompile Include="HLSL\Sprite_PS.hlsl" />

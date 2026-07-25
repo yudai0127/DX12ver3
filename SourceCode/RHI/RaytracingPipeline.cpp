@@ -25,8 +25,8 @@ bool RaytracingPipeline::CreateGlobalRootSignature(ID3D12Device5* device)
 {
     D3D12_DESCRIPTOR_RANGE uavRange = {};
     uavRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    uavRange.NumDescriptors = 2;          // u0 output + u1 accumulation
-    uavRange.BaseShaderRegister = 0;      // u0..u1
+    uavRange.NumDescriptors = 4;          // u0 output, u1 accum, u2 geo, u3 albedo
+    uavRange.BaseShaderRegister = 0;      // u0..u3
     uavRange.RegisterSpace = 0;
     uavRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 

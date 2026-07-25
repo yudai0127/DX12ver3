@@ -70,6 +70,14 @@ public:
     // Environment map brightness (0 = use the environment as-is is x1).
     float envIntensity = 1.0f;
 
+    // Spatial denoiser (path-tracing mode only). radius 0 = off.
+    bool denoise = true;
+    int  denoiseRadius = 2;
+
+    // Monte-Carlo samples traced per pixel per frame (path tracing). Higher =
+    // less noise while moving, at a proportional GPU cost. Clamped to [1, 8].
+    int  samplesPerFrame = 2;
+
     // Number of accumulated samples-per-pixel since the last reset (for the UI).
     uint32_t GetAccumulatedSamples() const { return m_accumIndex; }
 
@@ -105,6 +113,7 @@ private:
     };
 
     bool BuildPipeline();
+    bool BuildDenoisePipeline();      // compute root sig + PSO for the denoiser
     bool BuildAccelerationStructures(Scene* scene);
     bool BuildDescriptorHeap();       // output UAV + bindless base-color textures
     bool BuildShaderTable();
@@ -157,11 +166,34 @@ private:
     //   slots 1..T  : base-color texture SRVs (t3 array)
     ComPtr<ID3D12Resource>          m_output;   // LDR (back-buffer format), u0
     ComPtr<ID3D12Resource>          m_accum;    // HDR accumulation (RGBA32F), u1
+    ComPtr<ID3D12Resource>          m_geo;      // G-buffer normal+depth (RGBA32F), u2
+    ComPtr<ID3D12Resource>          m_albedo;   // primary-hit base color (RGBA32F), u3
     DescriptorHeap                  m_srvUavHeap;
     D3D12_CPU_DESCRIPTOR_HANDLE     m_outputUavCpu = {};
-    D3D12_GPU_DESCRIPTOR_HANDLE     m_outputUavGpu = {}; // UAV table base (u0,u1)
+    D3D12_GPU_DESCRIPTOR_HANDLE     m_outputUavGpu = {}; // UAV table base (u0..u3)
     D3D12_CPU_DESCRIPTOR_HANDLE     m_accumUavCpu = {};
+    D3D12_CPU_DESCRIPTOR_HANDLE     m_geoUavCpu = {};
+    D3D12_CPU_DESCRIPTOR_HANDLE     m_albedoUavCpu = {};
     D3D12_GPU_DESCRIPTOR_HANDLE     m_textureTableGpu = {};
+
+    // Denoiser compute pass. Two descriptor tables (one per ping-pong phase),
+    // each laid out as: accum SRV(t0), geo SRV(t1), albedo SRV(t2),
+    // history SRV(t3), output UAV(u0), history UAV(u1).
+    ComPtr<ID3D12RootSignature> m_denoiseRootSig;
+    ComPtr<ID3D12PipelineState> m_denoisePSO;
+    ConstantBuffer              m_denoiseCB;
+    D3D12_GPU_DESCRIPTOR_HANDLE m_denoiseTableGpu[2] = {};   // table base per phase
+    D3D12_CPU_DESCRIPTOR_HANDLE m_denoiseCpu[2][8] = {};     // views to (re)create
+
+    // Ping-pong temporal history:
+    //   m_histColor : demodulated lighting.rgb + history length.a
+    //   m_histGeo   : world position.xyz (for geometry-based history rejection)
+    ComPtr<ID3D12Resource>      m_histColor[2];
+    ComPtr<ID3D12Resource>      m_histGeo[2];
+    int                         m_histPhase = 0;             // 0/1, toggled per frame
+    DirectX::XMFLOAT4X4         m_prevViewProj = {};
+    bool                        m_hasPrevVP = false;
+
     std::vector<ID3D12Resource*>    m_textureResources; // all models' textures, in order
 
     // Equirectangular environment map (optional). Appended to the texture

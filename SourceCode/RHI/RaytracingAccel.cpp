@@ -109,8 +109,12 @@ namespace RaytracingAccel
         if (info.ResultDataMaxSizeInBytes == 0)
             return out;
 
+        // Buffers are always created in COMMON and auto-promote to UAV on the
+        // build's first access, so use COMMON to avoid the D3D12 debug-layer
+        // "InitialState ignored" warning (the UNORDERED_ACCESS request was
+        // being reported and dropped for every scratch buffer).
         out.scratch = CreateUavBuffer(device, info.ScratchDataSizeInBytes,
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            D3D12_RESOURCE_STATE_COMMON);
         out.result = CreateUavBuffer(device, info.ResultDataMaxSizeInBytes,
             D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
         if (!out.scratch || !out.result)
@@ -160,8 +164,12 @@ namespace RaytracingAccel
             return out;
         }
 
+        // Buffers are always created in COMMON and auto-promote to UAV on the
+        // build's first access, so use COMMON to avoid the D3D12 debug-layer
+        // "InitialState ignored" warning (the UNORDERED_ACCESS request was
+        // being reported and dropped for every scratch buffer).
         out.scratch = CreateUavBuffer(device, info.ScratchDataSizeInBytes,
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            D3D12_RESOURCE_STATE_COMMON);
         out.result = CreateUavBuffer(device, info.ResultDataMaxSizeInBytes,
             D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
         if (!out.scratch || !out.result)

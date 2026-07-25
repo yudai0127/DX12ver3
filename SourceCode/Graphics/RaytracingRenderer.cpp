@@ -21,6 +21,26 @@ namespace
     {
         return (size + align - 1) & ~(align - 1);
     }
+
+    // Matches DenoiseCB in Denoise_CS.hlsl (32 bytes).
+    struct DenoiseConstants
+    {
+        DirectX::XMUINT2 dim;
+        uint32_t         sampleCount;
+        int32_t          radius;
+
+        float            exposure;
+        float            normalPower;
+        float            depthSigma;
+        float            temporalAlpha;
+
+        DirectX::XMFLOAT4X4 invViewProj;   // current frame (reconstruct world pos)
+        DirectX::XMFLOAT4X4 prevViewProj;  // previous frame (reproject history)
+        DirectX::XMFLOAT4   cameraPos;
+
+        int32_t          temporalValid;    // 1 = history usable this frame
+        float            pad0, pad1, pad2;
+    };
 }
 
 //-----------------------------------------------------------------------------
@@ -40,7 +60,9 @@ bool RaytracingRenderer::Initialize(Scene* scene, uint32_t width, uint32_t heigh
     }
 
     if (!BuildPipeline())                     return false;
+    if (!BuildDenoisePipeline())              return false;
     if (!m_sceneCB.Initialize(sizeof(SceneConstants))) return false;
+    if (!m_denoiseCB.Initialize(sizeof(DenoiseConstants))) return false;
     // AS build also collects the per-model texture list used by the heap below.
     if (!BuildAccelerationStructures(scene))  return false;
 
@@ -91,6 +113,74 @@ bool RaytracingRenderer::BuildPipeline()
         return false;
     }
     return m_pipeline.Initialize(dev5, lib);
+}
+
+//-----------------------------------------------------------------------------
+// BuildDenoisePipeline  -  compute root signature + PSO for the denoiser.
+//   Root sig: table { SRV t0-t1 (color, geo) + UAV u0 (output) }, CBV b0.
+//-----------------------------------------------------------------------------
+bool RaytracingRenderer::BuildDenoisePipeline()
+{
+    auto* dm = DeviceManager::Instance();
+    ID3D12Device* device = dm->GetDevice();
+
+    D3D12_DESCRIPTOR_RANGE ranges[2] = {};
+    ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; // t0-t4: accum, geo, albedo, histColor, histGeo
+    ranges[0].NumDescriptors = 5;
+    ranges[0].BaseShaderRegister = 0;
+    ranges[0].OffsetInDescriptorsFromTableStart = 0;
+    ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV; // u0-u2: output, histColorOut, histGeoOut
+    ranges[1].NumDescriptors = 3;
+    ranges[1].BaseShaderRegister = 0;
+    ranges[1].OffsetInDescriptorsFromTableStart = 5;
+
+    D3D12_ROOT_PARAMETER params[2] = {};
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[0].DescriptorTable.NumDescriptorRanges = 2;
+    params[0].DescriptorTable.pDescriptorRanges = ranges;
+    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    params[1].Descriptor.ShaderRegister = 0; // b0
+    params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    D3D12_ROOT_SIGNATURE_DESC desc = {};
+    desc.NumParameters = 2;
+    desc.pParameters = params;
+    desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+
+    ComPtr<ID3DBlob> blob, err;
+    if (FAILED(D3D12SerializeRootSignature(
+        &desc, D3D_ROOT_SIGNATURE_VERSION_1_0, &blob, &err)))
+    {
+        if (err) OutputDebugStringA((const char*)err->GetBufferPointer());
+        OutputDebugStringW(L"[RT] denoise root signature serialize failed\n");
+        return false;
+    }
+    if (FAILED(device->CreateRootSignature(0, blob->GetBufferPointer(),
+        blob->GetBufferSize(), IID_PPV_ARGS(&m_denoiseRootSig))))
+    {
+        OutputDebugStringW(L"[RT] denoise root signature create failed\n");
+        return false;
+    }
+
+    std::vector<char> cs = ShaderManager::Instance()->CompileFromFile(
+        L"HLSL/Denoise_CS.hlsl", L"main", L"cs_6_0");
+    if (cs.empty())
+    {
+        OutputDebugStringW(L"[RT] Denoise_CS.hlsl compile failed\n");
+        return false;
+    }
+
+    D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {};
+    pd.pRootSignature = m_denoiseRootSig.Get();
+    pd.CS.pShaderBytecode = cs.data();
+    pd.CS.BytecodeLength = cs.size();
+    if (FAILED(device->CreateComputePipelineState(&pd, IID_PPV_ARGS(&m_denoisePSO))))
+    {
+        OutputDebugStringW(L"[RT] denoise PSO create failed\n");
+        return false;
+    }
+    return true;
 }
 
 //-----------------------------------------------------------------------------
@@ -389,23 +479,26 @@ bool RaytracingRenderer::BuildDescriptorHeap()
     ID3D12Device* device = dm->GetDevice();
 
     const UINT texCount = static_cast<UINT>(m_textureResources.size());
-    // 2 UAVs (output u0 + accumulation u1) followed by the texture SRVs.
-    if (!m_srvUavHeap.Initialize(device, 2 + texCount, /*shaderVisible*/ true))
+    // Layout: 4 UAVs (output u0, accum u1, geo u2, albedo u3) + texture SRVs
+    // + 16 denoiser descriptors (two 8-entry ping-pong tables).
+    if (!m_srvUavHeap.Initialize(device, 20 + texCount, /*shaderVisible*/ true))
     {
         OutputDebugStringW(L"[RT] descriptor heap init failed\n");
         return false;
     }
 
-    // slot 0: output UAV (u0), slot 1: accumulation UAV (u1). Views are created
-    // in CreateOutputResource; the UAV table base is slot 0.
-    auto outSlot = m_srvUavHeap.Allocate();
+    // Views are created in CreateOutputResource; the RT UAV table base is slot 0.
+    auto outSlot = m_srvUavHeap.Allocate();  // slot 0: output UAV (u0)
     m_outputUavCpu = outSlot.cpu;
     m_outputUavGpu = outSlot.gpu;
-    auto accSlot = m_srvUavHeap.Allocate();
+    auto accSlot = m_srvUavHeap.Allocate();  // slot 1: accum UAV (u1)
     m_accumUavCpu = accSlot.cpu;
+    auto geoSlot = m_srvUavHeap.Allocate();  // slot 2: geo UAV (u2)
+    m_geoUavCpu = geoSlot.cpu;
+    auto albSlot = m_srvUavHeap.Allocate();  // slot 3: albedo UAV (u3)
+    m_albedoUavCpu = albSlot.cpu;
 
-    // slots 2..: base-color texture SRVs. The texture table starts here even
-    // when there are no textures (the handle is then never dereferenced).
+    // base-color texture SRVs (RT t3 bindless array)
     m_textureTableGpu = m_outputUavGpu;
     for (UINT i = 0; i < texCount; ++i)
     {
@@ -422,6 +515,21 @@ bool RaytracingRenderer::BuildDescriptorHeap()
         srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         srv.Texture2D.MipLevels = rd.MipLevels;
         device->CreateShaderResourceView(res, &srv, slot.cpu);
+    }
+
+    // Denoiser: two contiguous 8-entry tables (ping-pong). Each table is
+    //   [accum SRV(t0), geo SRV(t1), albedo SRV(t2), histColor SRV(t3),
+    //    histGeo SRV(t4), output UAV(u0), histColor UAV(u1), histGeo UAV(u2)].
+    // Phase 0 reads m_hist*[0] / writes m_hist*[1]; phase 1 the reverse. The
+    // actual views are (re)created in CreateOutputResource.
+    for (int t = 0; t < 2; ++t)
+    {
+        for (int i = 0; i < 8; ++i)
+        {
+            auto slot = m_srvUavHeap.Allocate();
+            if (i == 0) m_denoiseTableGpu[t] = slot.gpu; // table base
+            m_denoiseCpu[t][i] = slot.cpu;
+        }
     }
     return true;
 }
@@ -475,19 +583,97 @@ bool RaytracingRenderer::CreateOutputResource(uint32_t width, uint32_t height)
     }
     m_accum->SetName(L"RT_Accum");
 
+    // G-buffer image (primary-hit normal.xyz + depth.w).
+    D3D12_RESOURCE_DESC gd = ad; // same as accum (RGBA32F, UAV)
+    m_geo.Reset();
+    if (FAILED(device->CreateCommittedResource(
+        &heap, D3D12_HEAP_FLAG_NONE, &gd,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&m_geo))))
+    {
+        OutputDebugStringW(L"[RT] G-buffer creation failed\n");
+        return false;
+    }
+    m_geo->SetName(L"RT_Geo");
+
+    // Albedo image (primary-hit base color, for demodulation).
+    m_albedo.Reset();
+    if (FAILED(device->CreateCommittedResource(
+        &heap, D3D12_HEAP_FLAG_NONE, &gd,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&m_albedo))))
+    {
+        OutputDebugStringW(L"[RT] albedo buffer creation failed\n");
+        return false;
+    }
+    m_albedo->SetName(L"RT_Albedo");
+
+    // Ping-pong temporal history: color (lighting.rgb + len.a) and geometry
+    // (world position.xyz, for geometry-based history rejection).
+    for (int i = 0; i < 2; ++i)
+    {
+        m_histColor[i].Reset();
+        if (FAILED(device->CreateCommittedResource(
+            &heap, D3D12_HEAP_FLAG_NONE, &gd,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&m_histColor[i]))))
+        {
+            OutputDebugStringW(L"[RT] history colour buffer creation failed\n");
+            return false;
+        }
+        m_histColor[i]->SetName(i == 0 ? L"RT_HistColor0" : L"RT_HistColor1");
+
+        m_histGeo[i].Reset();
+        if (FAILED(device->CreateCommittedResource(
+            &heap, D3D12_HEAP_FLAG_NONE, &gd,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&m_histGeo[i]))))
+        {
+            OutputDebugStringW(L"[RT] history geometry buffer creation failed\n");
+            return false;
+        }
+        m_histGeo[i]->SetName(i == 0 ? L"RT_HistGeo0" : L"RT_HistGeo1");
+    }
+
+    // ---- UAV views written by the ray generation shader (u0, u1, u2, u3) ----
     D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {};
     uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
     uav.Format = fmt;
     device->CreateUnorderedAccessView(m_output.Get(), nullptr, &uav, m_outputUavCpu);
 
-    D3D12_UNORDERED_ACCESS_VIEW_DESC uavA = {};
-    uavA.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-    uavA.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-    device->CreateUnorderedAccessView(m_accum.Get(), nullptr, &uavA, m_accumUavCpu);
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uavF = {};
+    uavF.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    uavF.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    device->CreateUnorderedAccessView(m_accum.Get(),  nullptr, &uavF, m_accumUavCpu);
+    device->CreateUnorderedAccessView(m_geo.Get(),    nullptr, &uavF, m_geoUavCpu);
+    device->CreateUnorderedAccessView(m_albedo.Get(), nullptr, &uavF, m_albedoUavCpu);
+
+    // ---- denoiser views: two ping-pong tables -----------------------------
+    // Each table: accum SRV(t0), geo SRV(t1), albedo SRV(t2), histColor SRV(t3),
+    //             histGeo SRV(t4), output UAV(u0), histColor UAV(u1), histGeo UAV(u2).
+    // Table 0 reads m_hist*[0] / writes m_hist*[1]; table 1 the reverse.
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Texture2D.MipLevels = 1;
+    for (int t = 0; t < 2; ++t)
+    {
+        ID3D12Resource* colRead  = m_histColor[t].Get();
+        ID3D12Resource* colWrite = m_histColor[1 - t].Get();
+        ID3D12Resource* geoRead  = m_histGeo[t].Get();
+        ID3D12Resource* geoWrite = m_histGeo[1 - t].Get();
+        device->CreateShaderResourceView(m_accum.Get(),  &srv, m_denoiseCpu[t][0]);
+        device->CreateShaderResourceView(m_geo.Get(),    &srv, m_denoiseCpu[t][1]);
+        device->CreateShaderResourceView(m_albedo.Get(), &srv, m_denoiseCpu[t][2]);
+        device->CreateShaderResourceView(colRead,        &srv, m_denoiseCpu[t][3]);
+        device->CreateShaderResourceView(geoRead,        &srv, m_denoiseCpu[t][4]);
+        device->CreateUnorderedAccessView(m_output.Get(), nullptr, &uav,  m_denoiseCpu[t][5]);
+        device->CreateUnorderedAccessView(colWrite,       nullptr, &uavF, m_denoiseCpu[t][6]);
+        device->CreateUnorderedAccessView(geoWrite,       nullptr, &uavF, m_denoiseCpu[t][7]);
+    }
 
     // A new/resized accumulation image must start fresh.
     m_accumIndex = 0;
     m_hasPrevKey = false;
+    m_hasPrevVP = false;
+    m_histPhase = 0;
     return true;
 }
 
@@ -529,6 +715,8 @@ void RaytracingRenderer::Render(const Camera& camera)
     XMVECTOR det;
     XMMATRIX invVP = XMMatrixInverse(&det, viewProj);
     XMStoreFloat4x4(&sc.invViewProj, invVP);
+    XMFLOAT4X4 curViewProj;
+    XMStoreFloat4x4(&curViewProj, viewProj); // for the denoiser's reprojection
 
     sc.cameraPos = XMFLOAT4(camera.eye.x, camera.eye.y, camera.eye.z, 1.0f);
     sc.lightDir = camera.lightDir;
@@ -538,7 +726,8 @@ void RaytracingRenderer::Render(const Camera& camera)
                              camera.lightColor.z * li, camera.lightColor.w);
     sc.ambient = camera.ambient;
     sc.ambient.w = exposure; // pass exposure to the tonemapper (ambient.rgb unused)
-    sc.envParams = XMFLOAT4((float)m_envTexIndex, envIntensity, 0.0f, 0.0f);
+    const int spp = (samplesPerFrame < 1) ? 1 : (samplesPerFrame > 8 ? 8 : samplesPerFrame);
+    sc.envParams = XMFLOAT4((float)m_envTexIndex, envIntensity, (float)spp, 0.0f);
 
     // Reset accumulation whenever anything that changes the image changes.
     const int depth = (maxBounces < 1) ? 1 : (maxBounces > 8 ? 8 : maxBounces);
@@ -584,6 +773,80 @@ void RaytracingRenderer::Render(const Camera& camera)
     desc.Height = m_height;
     desc.Depth = 1;
     cmd4->DispatchRays(&desc);
+
+    // ---- optional spatial denoise (path-tracing mode only) -----------
+    const bool doDenoise = (renderMode == 1) && denoise && m_denoisePSO &&
+                           denoiseRadius > 0;
+    if (doDenoise)
+    {
+        const int phase = m_histPhase;   // reads m_hist*[phase], writes m_hist*[1-phase]
+        ID3D12Resource* colRead = m_histColor[phase].Get();
+        ID3D12Resource* geoRead = m_histGeo[phase].Get();
+
+        DenoiseConstants dc = {};
+        dc.dim = XMUINT2(m_width, m_height);
+        dc.sampleCount = m_accumIndex + 1; // samples now in gAccum
+        dc.radius = denoiseRadius;
+        dc.exposure = exposure;
+        dc.normalPower = 32.0f;
+        dc.depthSigma = 0.02f;
+        dc.temporalAlpha = 0.1f;           // keep ~90% history once settled
+        dc.invViewProj = sc.invViewProj;
+        dc.prevViewProj = m_prevViewProj;
+        dc.cameraPos = sc.cameraPos;
+        dc.temporalValid = m_hasPrevVP ? 1 : 0;
+        m_denoiseCB.Update(dc);
+
+        // Order RayGen's output write before the denoiser overwrites it, and
+        // make gAccum/gGeo/albedo + the history-read image readable as SRVs.
+        D3D12_RESOURCE_BARRIER ob = {};
+        ob.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        ob.UAV.pResource = m_output.Get();
+        cmd4->ResourceBarrier(1, &ob);
+
+        cmdCtx.ResourceBarrier(m_accum.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        cmdCtx.ResourceBarrier(m_geo.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        cmdCtx.ResourceBarrier(m_albedo.Get(),
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        cmdCtx.ResourceBarrier(colRead,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        cmdCtx.ResourceBarrier(geoRead,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        cmd4->SetComputeRootSignature(m_denoiseRootSig.Get());
+        cmd4->SetPipelineState(m_denoisePSO.Get());
+        cmd4->SetComputeRootDescriptorTable(0, m_denoiseTableGpu[phase]);
+        cmd4->SetComputeRootConstantBufferView(1, m_denoiseCB.GetGpuAddress());
+        cmd4->Dispatch((m_width + 7) / 8, (m_height + 7) / 8, 1);
+
+        cmdCtx.ResourceBarrier(m_accum.Get(),
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cmdCtx.ResourceBarrier(m_geo.Get(),
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cmdCtx.ResourceBarrier(m_albedo.Get(),
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cmdCtx.ResourceBarrier(colRead,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cmdCtx.ResourceBarrier(geoRead,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        // Advance temporal state for next frame.
+        m_prevViewProj = curViewProj;
+        m_hasPrevVP = true;
+        m_histPhase = 1 - m_histPhase;
+    }
 
     // ---- copy output image into the back buffer ----------------------
     ID3D12Resource* backbuffer = dm->GetSwapChain().GetCurrentBackBuffer();

@@ -26,7 +26,9 @@ struct Vertex
 //---- global root signature ---------------------------------------------------
 RaytracingAccelerationStructure gScene  : register(t0);
 RWTexture2D<float4>             gOutput : register(u0); // LDR, back-buffer format
-RWTexture2D<float4>             gAccum  : register(u1); // HDR accumulation
+RWTexture2D<float4>             gAccum  : register(u1); // HDR accumulation (sum)
+RWTexture2D<float4>             gGeo    : register(u2); // G-buffer: normal.xyz + depth.w
+RWTexture2D<float4>             gAlbedo : register(u3); // primary-hit base color (for demodulation)
 
 cbuffer SceneCB : register(b0)
 {
@@ -179,6 +181,9 @@ void RayGen()
     {
         float3 radiance = float3(0, 0, 0);
         float3 tp = float3(1, 1, 1);
+        float3 geoN = float3(0, 0, 1);
+        float  geoD = -1.0f;             // < 0 = background
+        float3 geoAlb = float3(0, 0, 0);
         [loop]
         for (uint b = 0; b < maxDepth; ++b)
         {
@@ -189,6 +194,7 @@ void RayGen()
 
             radiance += tp * p.emissive; // glowing surfaces
             float3 N = p.normal, V = -dir;
+            if (b == 0u) { geoN = N; geoD = p.hitT; geoAlb = p.albedo; } // primary-hit G-buffer
             float3 L = normalize(-lightDir.xyz);
             float ndotl = saturate(dot(N, L));
             float vis = (ndotl > 0.0f) ? traceShadow(p.worldPos + N * 1e-2f, L) : 0.0f;
@@ -206,83 +212,122 @@ void RayGen()
             origin = p.worldPos + N * 1e-3f;
             dir = reflect(dir, N);
         }
+        gGeo[pix] = float4(geoN, geoD);
+        gAlbedo[pix] = float4(geoAlb, 1.0f);
         gOutput[pix] = float4(tonemap(radiance), 1.0f);
         return;
     }
 
     //=====================================================================
     // Path tracing mode: full Monte-Carlo GI with temporal accumulation.
+    // Trace several samples per pixel per frame (envParams.z) so moving frames
+    // are less noisy before the denoiser ever runs.
     //=====================================================================
+    uint   spp = (uint)max(envParams.z, 1.0f);
     float3 radiance = float3(0, 0, 0);
-    float3 throughput = float3(1, 1, 1);
+    float3 geoN = float3(0, 0, 1);
+    float  geoD = -1.0f;                 // < 0 = background
+    float3 geoAlb = float3(0, 0, 0);
+    bool   captured = false;
 
-    [loop]
-    for (uint b = 0; b < maxDepth; ++b)
+    for (uint sp = 0; sp < spp; ++sp)
     {
-        RayDesc ray; ray.Origin = origin; ray.Direction = dir; ray.TMin = 1e-3f; ray.TMax = 1e5f;
-        Payload p; p.hitT = -1.0f;
-        TraceRay(gScene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, p);
+        // Per-sample primary ray (own sub-pixel jitter for anti-aliasing).
+        float2 jit = float2(rnd(s), rnd(s)) - 0.5f;
+        float2 suv = (float2(pix) + 0.5f + jit) / float2(dim);
+        float2 sndc = float2(suv.x * 2.0f - 1.0f, 1.0f - suv.y * 2.0f);
+        float4 sfarW = mul(float4(sndc, 1.0f, 1.0f), invViewProj); sfarW /= sfarW.w;
+        float3 sOrigin = cameraPos.xyz;
+        float3 sDir = normalize(sfarW.xyz - sOrigin);
 
-        if (p.hitT < 0.0f)
+        float3 sampleRad = float3(0, 0, 0);
+        float3 throughput = float3(1, 1, 1);
+
+        [loop]
+        for (uint b = 0; b < maxDepth; ++b)
         {
-            radiance += throughput * skyColor(dir);
-            break;
+            RayDesc ray; ray.Origin = sOrigin; ray.Direction = sDir; ray.TMin = 1e-3f; ray.TMax = 1e5f;
+            Payload p; p.hitT = -1.0f;
+            TraceRay(gScene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, p);
+
+            if (p.hitT < 0.0f)
+            {
+                sampleRad += throughput * skyColor(sDir);
+                break;
+            }
+
+            sampleRad += throughput * p.emissive; // glowing surfaces contribute + drive GI
+
+            float3 N = p.normal;
+            float3 V = -sDir;
+            if (b == 0u && !captured)        // primary-hit G-buffer (first sample)
+            {
+                geoN = N; geoD = p.hitT; geoAlb = p.albedo; captured = true;
+            }
+
+            // Direct light with a soft (sampled) sun direction.
+            float3 L = normalize(-lightDir.xyz);
+            float3 Ls = sampleCone(L, 0.9995f, s);
+            float  ndotl = saturate(dot(N, Ls));
+            if (ndotl > 0.0f)
+            {
+                float vis = traceShadow(p.worldPos + N * 1e-2f, Ls);
+                sampleRad += throughput *
+                    PBR_DirectLight(N, V, Ls, p.albedo, p.metallic, p.roughness, lightColor.rgb) * vis;
+            }
+
+            // ---- indirect bounce: pick a diffuse or specular lobe ---------
+            float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), p.albedo, p.metallic);
+            float  NdotV = saturate(dot(N, V));
+            float3 F = F0 + (1.0f - F0) * pow(saturate(1.0f - NdotV), 5.0f);
+            float  pSpec = clamp(dot(F, float3(0.3333f, 0.3333f, 0.3333f)), 0.05f, 0.95f);
+
+            float3 newDir;
+            if (rnd(s) < pSpec)
+            {
+                float3 R = reflect(sDir, N);
+                float a2 = p.roughness * p.roughness;
+                float cosMax = lerp(0.99999f, 0.60f, a2);
+                newDir = sampleCone(R, cosMax, s);
+                if (dot(newDir, N) <= 0.0f) break;
+                throughput *= F / pSpec;
+            }
+            else
+            {
+                newDir = cosineSample(N, s);
+                throughput *= (p.albedo * (1.0f - p.metallic)) / (1.0f - pSpec);
+            }
+
+            sOrigin = p.worldPos + N * 1e-3f;
+            sDir = newDir;
+
+            if (b >= 3u)
+            {
+                float q = max(throughput.r, max(throughput.g, throughput.b));
+                if (rnd(s) > q) break;
+                throughput /= max(q, 1e-4f);
+            }
         }
 
-        radiance += throughput * p.emissive; // glowing surfaces contribute + drive GI
+        // Firefly suppression: clamp a single sample's extreme luminance so rare
+        // high-variance paths don't leave sparkling pixels the denoiser can only
+        // smear around. Slightly biased, but far less shimmery.
+        float lum = dot(sampleRad, float3(0.2126f, 0.7152f, 0.0722f));
+        const float maxLum = 10.0f;
+        if (lum > maxLum) sampleRad *= maxLum / lum;
 
-        float3 N = p.normal;
-        float3 V = -dir;
-
-        // Direct light with a soft (sampled) sun direction.
-        float3 L = normalize(-lightDir.xyz);
-        float3 Ls = sampleCone(L, 0.9995f, s);
-        float  ndotl = saturate(dot(N, Ls));
-        if (ndotl > 0.0f)
-        {
-            float vis = traceShadow(p.worldPos + N * 1e-2f, Ls);
-            radiance += throughput *
-                PBR_DirectLight(N, V, Ls, p.albedo, p.metallic, p.roughness, lightColor.rgb) * vis;
-        }
-
-        // ---- indirect bounce: pick a diffuse or specular lobe -------------
-        float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), p.albedo, p.metallic);
-        float  NdotV = saturate(dot(N, V));
-        float3 F = F0 + (1.0f - F0) * pow(saturate(1.0f - NdotV), 5.0f);
-        float  pSpec = clamp(dot(F, float3(0.3333f, 0.3333f, 0.3333f)), 0.05f, 0.95f);
-
-        float3 newDir;
-        if (rnd(s) < pSpec)
-        {
-            float3 R = reflect(dir, N);
-            float a2 = p.roughness * p.roughness;
-            float cosMax = lerp(0.99999f, 0.60f, a2);
-            newDir = sampleCone(R, cosMax, s);
-            if (dot(newDir, N) <= 0.0f) break;
-            throughput *= F / pSpec;
-        }
-        else
-        {
-            newDir = cosineSample(N, s);
-            throughput *= (p.albedo * (1.0f - p.metallic)) / (1.0f - pSpec);
-        }
-
-        origin = p.worldPos + N * 1e-3f;
-        dir = newDir;
-
-        if (b >= 3u)
-        {
-            float q = max(throughput.r, max(throughput.g, throughput.b));
-            if (rnd(s) > q) break;
-            throughput /= max(q, 1e-4f);
-        }
+        radiance += sampleRad;
     }
+    radiance /= float(spp);
 
     // ---- temporal accumulation ---------------------------------------------
     uint acc = frame.z;
     float3 prev = (acc == 0u) ? float3(0, 0, 0) : gAccum[pix].rgb;
     float3 sum = prev + radiance;
     gAccum[pix] = float4(sum, 1.0f);
+
+    gGeo[pix] = float4(geoN, geoD);
+    gAlbedo[pix] = float4(geoAlb, 1.0f);
 
     float3 avg = sum / float(acc + 1u);
     gOutput[pix] = float4(tonemap(avg), 1.0f);

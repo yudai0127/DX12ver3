@@ -1,5 +1,6 @@
 
 #include "Framework/Framework.h"
+#include "RHI/DLSS.h"
 #include <stdexcept>
 #include <cassert>
 #include <dxgi1_6.h>
@@ -120,9 +121,16 @@ void Framework::Render(float elapsedTime)
             ImGui::Text("RT instances: %zu", m_raytracer.GetInstanceCount());
             ImGui::SliderInt("RT Path Depth", &m_raytracer.maxBounces, 1, 8);
             if (m_renderMode == 2)
+            {
                 ImGui::Text("Accumulated: %u spp", m_raytracer.GetAccumulatedSamples());
+                ImGui::Checkbox("Denoise", &m_raytracer.denoise);
+                ImGui::SliderInt("Denoise Radius", &m_raytracer.denoiseRadius, 0, 4);
+                ImGui::SliderInt("Samples / Frame", &m_raytracer.samplesPerFrame, 1, 8);
+            }
             ImGui::SliderFloat("RT Exposure", &m_raytracer.exposure, 0.05f, 2.0f);
             ImGui::SliderFloat("Env Intensity", &m_raytracer.envIntensity, 0.0f, 5.0f);
+            ImGui::Separator();
+            ImGui::TextWrapped("%s", DLSS::Instance().StatusText());
         }
     }
     else
