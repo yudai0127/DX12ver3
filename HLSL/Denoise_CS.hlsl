@@ -16,6 +16,7 @@ Texture2D<float4>   gInGeo     : register(t1); // normal.xyz + depth.w (hitT)
 Texture2D<float4>   gInAlbedo  : register(t2); // primary-hit base color
 Texture2D<float4>   gHistColor : register(t3); // last frame: lighting.rgb + len.a
 Texture2D<float4>   gHistGeo   : register(t4); // last frame: world position.xyz
+Texture2D<float2>   gMotion    : register(t5); // pixel-space motion (prev - cur)
 RWTexture2D<float4> gOut       : register(u0); // LDR output (back-buffer format)
 RWTexture2D<float4> gHistColorOut : register(u1); // this frame: lighting + len
 RWTexture2D<float4> gHistGeoOut   : register(u2); // this frame: world position
@@ -122,26 +123,23 @@ void main(uint3 tid : SV_DispatchThreadID)
 
     if (gTemporalValid != 0)
     {
-        float4 pc = mul(float4(worldPos, 1.0f), gPrevViewProj);
-        if (pc.w > 0.0f)
+        // Follow the motion vector the ray tracer wrote (same buffer DLSS will
+        // consume), instead of reprojecting again here.
+        float2 prevPix = (float2(p) + 0.5f) + gMotion[p];
+        if (prevPix.x >= 0.0f && prevPix.y >= 0.0f &&
+            prevPix.x < (float)gDim.x && prevPix.y < (float)gDim.y)
         {
-            float2 pndc = pc.xy / pc.w;
-            float2 puv  = float2(pndc.x * 0.5f + 0.5f, 0.5f - pndc.y * 0.5f);
-            if (puv.x >= 0.0f && puv.x <= 1.0f && puv.y >= 0.0f && puv.y <= 1.0f)
-            {
-                int2 hp = clamp(int2(puv * float2(gDim)),
-                                int2(0, 0), int2(gDim) - int2(1, 1));
+            int2 hp = clamp(int2(prevPix), int2(0, 0), int2(gDim) - int2(1, 1));
 
-                float3 hPos = gHistGeo[hp].xyz;
-                // Accept only if the reprojected pixel is the same surface point.
-                float  thresh = max(0.02f * cD, 0.5f);
-                if (length(hPos - worldPos) < thresh)
-                {
-                    float4 hc = gHistColor[hp];
-                    histLight = hc.rgb;
-                    histLen   = hc.a;
-                    accepted  = true;
-                }
+            float3 hPos = gHistGeo[hp].xyz;
+            // Accept only if the reprojected pixel is the same surface point.
+            float  thresh = max(0.02f * cD, 0.5f);
+            if (length(hPos - worldPos) < thresh)
+            {
+                float4 hc = gHistColor[hp];
+                histLight = hc.rgb;
+                histLen   = hc.a;
+                accepted  = true;
             }
         }
     }

@@ -78,6 +78,35 @@ public:
     // less noise while moving, at a proportional GPU cost. Clamped to [1, 8].
     int  samplesPerFrame = 2;
 
+    // Fraction of the output resolution the rays are actually traced at.
+    // 1.0 = native; 0.5 quarters the pixel count (and roughly the cost) and
+    // the image is scaled back up to the window size afterwards. This is the
+    // knob DLSS upscaling is built on. Clamped to [0.25, 1.0].
+    float renderScale = 1.0f;
+
+    // Use DLSS Ray Reconstruction instead of the built-in denoiser + bilinear
+    // upscale. Ignored when Streamline reports Ray Reconstruction unavailable.
+    bool useDLSS = false;
+
+    // DLSS preset. While DLSS is on this replaces renderScale: DLSS dictates
+    // the render resolution for the chosen preset, and feeding it anything else
+    // both costs performance and stops it cancelling the sub-pixel jitter.
+    // 0 = Ultra Performance ... 4 = DLAA (native resolution).
+    int dlssQuality = 2; // Balanced
+
+    // Render DLSS frames without a sub-pixel offset. Costs reconstruction
+    // quality (DLSS gets no new sub-pixel information each frame) and is kept
+    // only as a way to rule the jitter out when chasing temporal artefacts.
+    bool dlssJitter = true;
+
+    // True when DLSS actually ran on the last frame (the UI reports this, so a
+    // silent fallback to the built-in path is visible).
+    bool WasDLSSActive() const { return m_dlssActive; }
+
+    // Resolution rays are traced at this frame (output res * renderScale).
+    uint32_t GetRenderWidth() const { return m_renderWidth; }
+    uint32_t GetRenderHeight() const { return m_renderHeight; }
+
     // Number of accumulated samples-per-pixel since the last reset (for the UI).
     uint32_t GetAccumulatedSamples() const { return m_accumIndex; }
 
@@ -91,7 +120,9 @@ private:
         DirectX::XMFLOAT4   lightColor;
         DirectX::XMFLOAT4   ambient;
         DirectX::XMUINT4    frame;
-        DirectX::XMFLOAT4   envParams; // x = env texture index (-1 = none), y = intensity
+        DirectX::XMFLOAT4   envParams; // x = env tex index (-1 = none), y = intensity, z = spp
+        DirectX::XMFLOAT4X4 prevViewProj; // previous frame (motion vectors)
+        DirectX::XMFLOAT4   prevParams;   // x = 1 when prevViewProj is valid
     };
 
     // Per-hit-record local root arguments (must match the local root signature
@@ -114,14 +145,17 @@ private:
 
     bool BuildPipeline();
     bool BuildDenoisePipeline();      // compute root sig + PSO for the denoiser
+    bool BuildUpscalePipeline();      // compute root sig + PSO for the upscaler
     bool BuildAccelerationStructures(Scene* scene);
     bool BuildDescriptorHeap();       // output UAV + bindless base-color textures
     bool BuildShaderTable();
     bool CreateOutputResource(uint32_t width, uint32_t height);
 
     bool     m_valid = false;
-    uint32_t m_width = 0;
+    uint32_t m_width = 0;         // output (window) resolution
     uint32_t m_height = 0;
+    uint32_t m_renderWidth = 0;   // resolution rays are traced at
+    uint32_t m_renderHeight = 0;
     uint32_t m_frameCounter = 0;  // ever-increasing; drives the per-frame RNG
     uint32_t m_accumIndex = 0;    // samples accumulated since the last reset
 
@@ -135,6 +169,7 @@ private:
         float             envIntensity = 0.0f;
         int               depth = 0;
         int               mode = 0;
+        int               spp = 0;
         uint32_t          w = 0, h = 0;
     } m_prevKey;
     bool m_hasPrevKey = false;
@@ -168,12 +203,23 @@ private:
     ComPtr<ID3D12Resource>          m_accum;    // HDR accumulation (RGBA32F), u1
     ComPtr<ID3D12Resource>          m_geo;      // G-buffer normal+depth (RGBA32F), u2
     ComPtr<ID3D12Resource>          m_albedo;   // primary-hit base color (RGBA32F), u3
+    ComPtr<ID3D12Resource>          m_motion;   // pixel-space motion vectors (RG32F), u4
+
+    // Guide buffers for DLSS Ray Reconstruction (written by the ray tracer,
+    // consumed by DLSS; our own denoiser does not read them).
+    ComPtr<ID3D12Resource>          m_normalRough;  // normal.xyz + roughness (RGBA16F), u5
+    ComPtr<ID3D12Resource>          m_specAlbedo;   // specular albedo F0 (RGBA16F), u6
+    ComPtr<ID3D12Resource>          m_linearDepth;  // primary-hit distance (R32F), u7
     DescriptorHeap                  m_srvUavHeap;
     D3D12_CPU_DESCRIPTOR_HANDLE     m_outputUavCpu = {};
-    D3D12_GPU_DESCRIPTOR_HANDLE     m_outputUavGpu = {}; // UAV table base (u0..u3)
+    D3D12_GPU_DESCRIPTOR_HANDLE     m_outputUavGpu = {}; // UAV table base (u0..u4)
     D3D12_CPU_DESCRIPTOR_HANDLE     m_accumUavCpu = {};
     D3D12_CPU_DESCRIPTOR_HANDLE     m_geoUavCpu = {};
     D3D12_CPU_DESCRIPTOR_HANDLE     m_albedoUavCpu = {};
+    D3D12_CPU_DESCRIPTOR_HANDLE     m_motionUavCpu = {};
+    D3D12_CPU_DESCRIPTOR_HANDLE     m_normalRoughUavCpu = {};
+    D3D12_CPU_DESCRIPTOR_HANDLE     m_specAlbedoUavCpu = {};
+    D3D12_CPU_DESCRIPTOR_HANDLE     m_linearDepthUavCpu = {};
     D3D12_GPU_DESCRIPTOR_HANDLE     m_textureTableGpu = {};
 
     // Denoiser compute pass. Two descriptor tables (one per ping-pong phase),
@@ -183,7 +229,7 @@ private:
     ComPtr<ID3D12PipelineState> m_denoisePSO;
     ConstantBuffer              m_denoiseCB;
     D3D12_GPU_DESCRIPTOR_HANDLE m_denoiseTableGpu[2] = {};   // table base per phase
-    D3D12_CPU_DESCRIPTOR_HANDLE m_denoiseCpu[2][8] = {};     // views to (re)create
+    D3D12_CPU_DESCRIPTOR_HANDLE m_denoiseCpu[2][9] = {};     // views to (re)create
 
     // Ping-pong temporal history:
     //   m_histColor : demodulated lighting.rgb + history length.a
@@ -193,6 +239,25 @@ private:
     int                         m_histPhase = 0;             // 0/1, toggled per frame
     DirectX::XMFLOAT4X4         m_prevViewProj = {};
     bool                        m_hasPrevVP = false;
+    bool                        m_dlssActive = false; // DLSS ran last frame
+
+    // Upscale pass: render-resolution image -> output-resolution image.
+    // DLSS takes this job over once it is wired up; this is the fallback.
+    ComPtr<ID3D12Resource>      m_upscaled;   // output-resolution LDR image
+    ComPtr<ID3D12RootSignature> m_upscaleRootSig;
+    ComPtr<ID3D12PipelineState> m_upscalePSO;
+    ConstantBuffer              m_upscaleCB;
+    D3D12_GPU_DESCRIPTOR_HANDLE m_upscaleTableGpu = {};
+    D3D12_CPU_DESCRIPTOR_HANDLE m_outputSrvCpu = {};   // t0: render-res image
+    D3D12_CPU_DESCRIPTOR_HANDLE m_upscaledUavCpu = {}; // u0: output-res image
+
+    // Ray Reconstruction only accepts linear HDR colour, so it writes here and
+    // the upscale pass then tonemaps this into m_upscaled. A second table is
+    // needed because the source texture differs from the fallback path's.
+    ComPtr<ID3D12Resource>      m_dlssColor;  // output-resolution HDR (RGBA16F)
+    D3D12_GPU_DESCRIPTOR_HANDLE m_tonemapTableGpu = {};
+    D3D12_CPU_DESCRIPTOR_HANDLE m_dlssColorSrvCpu = {};
+    D3D12_CPU_DESCRIPTOR_HANDLE m_upscaledUav2Cpu = {};
 
     std::vector<ID3D12Resource*>    m_textureResources; // all models' textures, in order
 

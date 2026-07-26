@@ -120,12 +120,29 @@ void Framework::Render(float elapsedTime)
         {
             ImGui::Text("RT instances: %zu", m_raytracer.GetInstanceCount());
             ImGui::SliderInt("RT Path Depth", &m_raytracer.maxBounces, 1, 8);
+            ImGui::SliderFloat("Render Scale", &m_raytracer.renderScale, 0.25f, 1.0f);
+            ImGui::Text("Render res: %u x %u", m_raytracer.GetRenderWidth(),
+                        m_raytracer.GetRenderHeight());
             if (m_renderMode == 2)
             {
                 ImGui::Text("Accumulated: %u spp", m_raytracer.GetAccumulatedSamples());
                 ImGui::Checkbox("Denoise", &m_raytracer.denoise);
                 ImGui::SliderInt("Denoise Radius", &m_raytracer.denoiseRadius, 0, 4);
                 ImGui::SliderInt("Samples / Frame", &m_raytracer.samplesPerFrame, 1, 8);
+                if (DLSS::Instance().SupportsRayReconstruction())
+                {
+                    ImGui::Checkbox("DLSS Ray Reconstruction", &m_raytracer.useDLSS);
+                    if (m_raytracer.useDLSS)
+                    {
+                        const char* q[] = { "Ultra Performance", "Performance",
+                                            "Balanced", "Quality", "DLAA (native)" };
+                        ImGui::Combo("DLSS Quality", &m_raytracer.dlssQuality, q, 5);
+                        ImGui::Text("DLSS: %s",
+                                    m_raytracer.WasDLSSActive() ? "active" : "FAILED (fallback)");
+                        ImGui::TextDisabled("Render Scale is ignored while DLSS is on");
+                        ImGui::Checkbox("DLSS Jitter", &m_raytracer.dlssJitter);
+                    }
+                }
             }
             ImGui::SliderFloat("RT Exposure", &m_raytracer.exposure, 0.05f, 2.0f);
             ImGui::SliderFloat("Env Intensity", &m_raytracer.envIntensity, 0.0f, 5.0f);

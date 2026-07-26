@@ -1,0 +1,46 @@
+From 5bf118cdc6c32832cdae0036ab6a91ad927d4504 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 26 Jul 2026 14:22:18 +0000
+Subject: [PATCH] Declare geoMetal in the path tracing scope
+
+The metalness variable was only declared in the raytracing branch while both
+branches used it, so PathTrace.hlsl no longer compiled. The renderer treats a
+failed library compile as no DXR support, which is why raytracing and path
+tracing disappeared from the mode list and the app fell back to the rasterizer.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01SfcRdgEzpuV52YCuhdR5ty
+---
+ HLSL/PathTrace.hlsl | 9 +++++----
+ 1 file changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/HLSL/PathTrace.hlsl b/HLSL/PathTrace.hlsl
+index e3f7c13..254415b 100644
+--- a/HLSL/PathTrace.hlsl
++++ b/HLSL/PathTrace.hlsl
+@@ -316,6 +316,7 @@ void RayGen()
+     float3 geoPos = float3(0, 0, 0);     // primary-hit world position (motion vectors)
+     float  geoRough = 1.0f;              // primary-hit roughness (DLSS guide buffers)
+     float3 geoSpec = float3(0, 0, 0);    // primary-hit specular albedo (F0)
++    float  geoMetal = 0.0f;              // primary-hit metalness
+     float2 geoJit = float2(0, 0);        // jitter of the ray that filled geoPos
+     bool   captured = false;
+ 
+@@ -425,10 +426,10 @@ void RayGen()
+     gAccum[pix] = float4(sum, 1.0f);
+ 
+     gGeo[pix] = float4(geoN, geoD);
+-    // Diffuse albedo only: metals have no diffuse lobe, and their colour
+-        // is already carried by the specular albedo. Handing the full base
+-        // colour to both would make DLSS demodulate metal twice.
+-        gAlbedo[pix] = float4(geoAlb * (1.0f - geoMetal), 1.0f);
++    // Diffuse albedo only: metals have no diffuse lobe, and their colour is
++    // already carried by the specular albedo. Handing the full base colour to
++    // both would make DLSS demodulate metal twice.
++    gAlbedo[pix] = float4(geoAlb * (1.0f - geoMetal), 1.0f);
+     // Background reprojects a far point along the unjittered centre ray, so it
+     // carries no offset; surfaces use the jitter their primary ray was traced
+     // with.
+-- 
+2.43.0
+

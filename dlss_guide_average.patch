@@ -1,0 +1,123 @@
+From 038f9588872110942f92cf0c3d8839ff37194d62 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 26 Jul 2026 14:51:17 +0000
+Subject: [PATCH] Average the DLSS guide buffers over every sample in the frame
+
+Raising samples per frame from 1 to 8 changed the crawling not at all, which
+rules out Monte Carlo variance and points at the guide buffers instead: they
+were filled from the first sample only and every later sample was skipped, so
+normal, roughness, albedo, depth and motion stayed exactly as noisy as a
+1-sample image however much the lighting improved.
+
+The normal is the damaging one. It comes from a normal map point-sampled at
+whichever sub-pixel position that single ray happened to use, so it lands on a
+different texel each frame and DLSS is told the surface has changed
+orientation - it reconstructs accordingly, and the surface appears to undulate.
+That also explains why the background, which has no normal map and therefore
+identical guides every frame, stayed perfectly still.
+
+Primary-hit data is now summed across all samples that hit and averaged, giving
+DLSS a filtered view of the surface. Samples per frame now improves the guides
+as well as the lighting, and the earlier within-pixel sample spread finally
+does something useful.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01SfcRdgEzpuV52YCuhdR5ty
+---
+ HLSL/PathTrace.hlsl | 65 ++++++++++++++++++++++++++++++++++-----------
+ 1 file changed, 49 insertions(+), 16 deletions(-)
+
+diff --git a/HLSL/PathTrace.hlsl b/HLSL/PathTrace.hlsl
+index 70d650d..3dda206 100644
+--- a/HLSL/PathTrace.hlsl
++++ b/HLSL/PathTrace.hlsl
+@@ -348,15 +348,20 @@ void RayGen()
+     //=====================================================================
+     uint   spp = (uint)max(envParams.z, 1.0f);
+     float3 radiance = float3(0, 0, 0);
+-    float3 geoN = float3(0, 0, 1);
+-    float  geoD = -1.0f;                 // < 0 = background
+-    float3 geoAlb = float3(0, 0, 0);
+-    float3 geoPos = float3(0, 0, 0);     // primary-hit world position (motion vectors)
+-    float  geoRough = 1.0f;              // primary-hit roughness (DLSS guide buffers)
+-    float3 geoSpec = float3(0, 0, 0);    // primary-hit specular albedo (F0)
+-    float  geoMetal = 0.0f;              // primary-hit metalness
+-    float2 geoJit = float2(0, 0);        // jitter of the ray that filled geoPos
+-    bool   captured = false;
++
++    // Primary-hit surface data, summed over every sample that hit something and
++    // averaged at the end. Taking it from a single sample instead leaves the
++    // guide buffers as noisy as a 1-sample image no matter how many samples the
++    // lighting gets: the normal map is point-sampled at whatever sub-pixel
++    // position that one ray used, so it lands on a different texel each frame
++    // and DLSS sees the surface itself changing orientation.
++    float3 gnSum = float3(0, 0, 0);
++    float3 galbSum = float3(0, 0, 0);
++    float3 gspecSum = float3(0, 0, 0);
++    float3 gposSum = float3(0, 0, 0);
++    float2 gjitSum = float2(0, 0);
++    float  gdSum = 0.0f, groughSum = 0.0f, gmetalSum = 0.0f;
++    uint   gcount = 0;
+ 
+     for (uint sp = 0; sp < spp; ++sp)
+     {
+@@ -404,14 +409,17 @@ void RayGen()
+ 
+             float3 N = p.normal;
+             float3 V = -sDir;
+-            if (b == 0u && !captured)        // primary-hit G-buffer (first sample)
++            if (b == 0u)                     // primary hit: feed the guide buffers
+             {
+-                geoN = N; geoD = p.hitT; geoAlb = p.albedo; geoPos = p.worldPos;
+-                geoRough = p.roughness;
+-                geoSpec = lerp(float3(0.04f, 0.04f, 0.04f), p.albedo, p.metallic);
+-                geoMetal = p.metallic;
+-                geoJit = jit;   // this sample's offset, for the motion vector
+-                captured = true;
++                gnSum += N;
++                gdSum += p.hitT;
++                galbSum += p.albedo;
++                gposSum += p.worldPos;
++                groughSum += p.roughness;
++                gspecSum += lerp(float3(0.04f, 0.04f, 0.04f), p.albedo, p.metallic);
++                gmetalSum += p.metallic;
++                gjitSum += jit;              // offset this sample was traced with
++                ++gcount;
+             }
+ 
+             // Direct light with a soft (sampled) sun direction.
+@@ -479,6 +487,31 @@ void RayGen()
+     }
+     radiance /= float(spp);
+ 
++    // ---- resolve the guide buffers -----------------------------------------
++    // Averaging over the samples that hit gives DLSS a filtered view of the
++    // surface, so normal-map and texture detail stops flickering between
++    // frames. gcount == 0 means every sample missed: a background pixel.
++    float3 geoN = float3(0, 0, 1);
++    float  geoD = -1.0f;                 // < 0 = background
++    float3 geoAlb = float3(0, 0, 0);
++    float3 geoPos = float3(0, 0, 0);
++    float  geoRough = 1.0f;
++    float3 geoSpec = float3(0, 0, 0);
++    float  geoMetal = 0.0f;
++    float2 geoJit = float2(0, 0);
++    if (gcount > 0u)
++    {
++        float inv = 1.0f / float(gcount);
++        geoN = normalize(gnSum * inv);
++        geoD = gdSum * inv;
++        geoAlb = galbSum * inv;
++        geoPos = gposSum * inv;
++        geoRough = groughSum * inv;
++        geoSpec = gspecSum * inv;
++        geoMetal = gmetalSum * inv;
++        geoJit = gjitSum * inv;
++    }
++
+     // ---- temporal accumulation ---------------------------------------------
+     uint acc = frame.z;
+     float3 prev = (acc == 0u) ? float3(0, 0, 0) : gAccum[pix].rgb;
+-- 
+2.43.0
+

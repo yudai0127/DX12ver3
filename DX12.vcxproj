@@ -118,6 +118,7 @@
     <None Include="HLSL\Sprite.hlsli" />
     <None Include="HLSL\PathTrace.hlsl" />
     <None Include="HLSL\Denoise_CS.hlsl" />
+    <None Include="HLSL\Upscale_CS.hlsl" />
   </ItemGroup>
   <ItemGroup>
     <FxCompile Include="HLSL\GltfModel_PS.hlsl">

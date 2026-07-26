@@ -1,0 +1,149 @@
+From 29b0231ece1be4b855dece052762cd402bf8dc5a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 26 Jul 2026 14:16:13 +0000
+Subject: [PATCH] Fix diffuse albedo for metals and settle the DLSS jitter sign
+
+Testing all four sign combinations showed only the fully negated jitter offset
+holds a static image still, so that is now a constant and the selector is gone.
+
+That left a slower crawling over the model's surface. Differencing consecutive
+frames put it squarely on the armour - the metallic surfaces - which points at
+the demodulation guide buffers: we were handing DLSS the full base colour as
+diffuse albedo while also reporting it as specular albedo through
+F0 = lerp(0.04, albedo, metallic). Metals have no diffuse lobe, so their colour
+was being demodulated twice and the reconstruction could not settle. Diffuse
+albedo is now base colour scaled by (1 - metallic).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01SfcRdgEzpuV52YCuhdR5ty
+---
+ HLSL/PathTrace.hlsl                        | 13 +++++++++++--
+ SourceCode/Framework/Framework.cpp         |  8 +-------
+ SourceCode/Graphics/RaytracingRenderer.cpp | 11 +++++------
+ SourceCode/Graphics/RaytracingRenderer.h   | 15 +++------------
+ 4 files changed, 20 insertions(+), 27 deletions(-)
+
+diff --git a/HLSL/PathTrace.hlsl b/HLSL/PathTrace.hlsl
+index cebfcc4..e3f7c13 100644
+--- a/HLSL/PathTrace.hlsl
++++ b/HLSL/PathTrace.hlsl
+@@ -248,6 +248,7 @@ void RayGen()
+         float3 geoPos = float3(0, 0, 0); // primary-hit world position (motion vectors)
+         float  geoRough = 1.0f;          // primary-hit roughness  (DLSS guide buffers)
+         float3 geoSpec = float3(0, 0, 0);// primary-hit specular albedo (F0)
++        float  geoMetal = 0.0f;          // primary-hit metalness
+         [loop]
+         for (uint b = 0; b < maxDepth; ++b)
+         {
+@@ -263,6 +264,7 @@ void RayGen()
+                 geoN = N; geoD = p.hitT; geoAlb = p.albedo; geoPos = p.worldPos;
+                 geoRough = p.roughness;
+                 geoSpec = lerp(float3(0.04f, 0.04f, 0.04f), p.albedo, p.metallic);
++                geoMetal = p.metallic;
+             }
+             float3 L = normalize(-lightDir.xyz);
+             float ndotl = saturate(dot(N, L));
+@@ -282,7 +284,10 @@ void RayGen()
+             dir = reflect(dir, N);
+         }
+         gGeo[pix] = float4(geoN, geoD);
+-        gAlbedo[pix] = float4(geoAlb, 1.0f);
++        // Diffuse albedo only: metals have no diffuse lobe, and their colour
++        // is already carried by the specular albedo. Handing the full base
++        // colour to both would make DLSS demodulate metal twice.
++        gAlbedo[pix] = float4(geoAlb * (1.0f - geoMetal), 1.0f);
+         // Background pixels still move when the camera turns: reproject a point
+         // far along the primary ray instead of a surface hit.
+         // Raytracing mode never jitters, so the offset is zero here.
+@@ -353,6 +358,7 @@ void RayGen()
+                 geoN = N; geoD = p.hitT; geoAlb = p.albedo; geoPos = p.worldPos;
+                 geoRough = p.roughness;
+                 geoSpec = lerp(float3(0.04f, 0.04f, 0.04f), p.albedo, p.metallic);
++                geoMetal = p.metallic;
+                 geoJit = jit;   // this sample's offset, for the motion vector
+                 captured = true;
+             }
+@@ -419,7 +425,10 @@ void RayGen()
+     gAccum[pix] = float4(sum, 1.0f);
+ 
+     gGeo[pix] = float4(geoN, geoD);
+-    gAlbedo[pix] = float4(geoAlb, 1.0f);
++    // Diffuse albedo only: metals have no diffuse lobe, and their colour
++        // is already carried by the specular albedo. Handing the full base
++        // colour to both would make DLSS demodulate metal twice.
++        gAlbedo[pix] = float4(geoAlb * (1.0f - geoMetal), 1.0f);
+     // Background reprojects a far point along the unjittered centre ray, so it
+     // carries no offset; surfaces use the jitter their primary ray was traced
+     // with.
+diff --git a/SourceCode/Framework/Framework.cpp b/SourceCode/Framework/Framework.cpp
+index 1817a9d..d7fdec4 100644
+--- a/SourceCode/Framework/Framework.cpp
++++ b/SourceCode/Framework/Framework.cpp
+@@ -140,13 +140,7 @@ void Framework::Render(float elapsedTime)
+                         ImGui::Text("DLSS: %s",
+                                     m_raytracer.WasDLSSActive() ? "active" : "FAILED (fallback)");
+                         ImGui::TextDisabled("Render Scale is ignored while DLSS is on");
+-                        ImGui::Checkbox("DLSS Jitter (diagnostic)", &m_raytracer.dlssJitter);
+-                        if (m_raytracer.dlssJitter)
+-                        {
+-                            const char* sg[] = { "(+x, +y)", "(+x, -y)",
+-                                                 "(-x, +y)", "(-x, -y)" };
+-                            ImGui::Combo("Jitter Sign", &m_raytracer.dlssJitterSign, sg, 4);
+-                        }
++                        ImGui::Checkbox("DLSS Jitter", &m_raytracer.dlssJitter);
+                     }
+                 }
+             }
+diff --git a/SourceCode/Graphics/RaytracingRenderer.cpp b/SourceCode/Graphics/RaytracingRenderer.cpp
+index afb2059..754ab04 100644
+--- a/SourceCode/Graphics/RaytracingRenderer.cpp
++++ b/SourceCode/Graphics/RaytracingRenderer.cpp
+@@ -1211,12 +1211,11 @@ void RaytracingRenderer::Render(const Camera& camera)
+         f.farZ = camera.farZ;
+         f.fovY = XMConvertToRadians(camera.fovDegree);
+         f.aspect = aspect;
+-        // The ray tracer keeps rendering with `jitter`; only the value handed to
+-        // DLSS is re-signed, since that is the convention in question.
+-        const int sgn = (dlssJitterSign < 0) ? 0 : (dlssJitterSign > 3 ? 3 : dlssJitterSign);
+-        const float sx = (sgn & 2) ? -1.0f : 1.0f;
+-        const float sy = (sgn & 1) ? -1.0f : 1.0f;
+-        f.jitter = XMFLOAT2(jitter.x * sx, jitter.y * sy);
++        // DLSS's jitter offset runs opposite to the offset we apply to the ray:
++        // established by testing all four sign combinations, only the fully
++        // negated one holds a static image still. The ray tracer keeps
++        // rendering with `jitter` itself.
++        f.jitter = XMFLOAT2(-jitter.x, -jitter.y);
+         f.reset = !m_hasPrevVP;
+         f.quality = quality;
+ 
+diff --git a/SourceCode/Graphics/RaytracingRenderer.h b/SourceCode/Graphics/RaytracingRenderer.h
+index 57609e4..f0c25a3 100644
+--- a/SourceCode/Graphics/RaytracingRenderer.h
++++ b/SourceCode/Graphics/RaytracingRenderer.h
+@@ -94,20 +94,11 @@ public:
+     // 0 = Ultra Performance ... 4 = DLAA (native resolution).
+     int dlssQuality = 2; // Balanced
+ 
+-    // Diagnostic: render every DLSS frame without a sub-pixel offset. Upscaling
+-    // quality drops (DLSS gets no new sub-pixel information), but it isolates
+-    // where instability comes from - if the image steadies with this off, the
+-    // jitter convention is at fault; if it still moves, the problem is in the
+-    // history inputs (motion vectors, depth) instead.
++    // Render DLSS frames without a sub-pixel offset. Costs reconstruction
++    // quality (DLSS gets no new sub-pixel information each frame) and is kept
++    // only as a way to rule the jitter out when chasing temporal artefacts.
+     bool dlssJitter = true;
+ 
+-    // Sign convention for the jitter offset reported to DLSS. Our ray
+-    // generation offsets NDC by (+x, -y) because screen-space Y runs downward,
+-    // while the usual DLSS integration offsets by (+x, +y); the header only
+-    // documents "pixel space" and not the direction, so this stays selectable
+-    // rather than guessed. 0 = (+x,+y), 1 = (+x,-y), 2 = (-x,+y), 3 = (-x,-y).
+-    int dlssJitterSign = 1;
+-
+     // True when DLSS actually ran on the last frame (the UI reports this, so a
+     // silent fallback to the built-in path is visible).
+     bool WasDLSSActive() const { return m_dlssActive; }
+-- 
+2.43.0
+

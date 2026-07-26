@@ -29,16 +29,29 @@ RWTexture2D<float4>             gOutput : register(u0); // LDR, back-buffer form
 RWTexture2D<float4>             gAccum  : register(u1); // HDR accumulation (sum)
 RWTexture2D<float4>             gGeo    : register(u2); // G-buffer: normal.xyz + depth.w
 RWTexture2D<float4>             gAlbedo : register(u3); // primary-hit base color (for demodulation)
+RWTexture2D<float2>             gMotion : register(u4); // pixel-space motion vector (prev - cur)
+
+// Guide buffers DLSS Ray Reconstruction consumes. They describe the primary
+// hit's surface so the AI denoiser knows what it is looking at; our own
+// denoiser does not read them.
+RWTexture2D<float4>             gNormalRough : register(u5); // normal.xyz + roughness.w
+RWTexture2D<float4>             gSpecAlbedo  : register(u6); // specular albedo (F0)
+RWTexture2D<float>              gLinearDepth : register(u7); // primary-hit distance
 
 cbuffer SceneCB : register(b0)
 {
     row_major float4x4 invViewProj;
-    float4 cameraPos;
+    float4 cameraPos;   // xyz = eye, w = far plane distance
     float4 lightDir;    // direction the light travels toward
     float4 lightColor;
     float4 ambient;
     uint4  frame;       // x=rng seed, y=maxDepth, z=accumIndex, w=render mode
-    float4 envParams;   // x=env texture index (-1=none), y=intensity
+    float4 envParams;   // x=env texture index (-1=none), y=intensity, z=samples/frame
+    row_major float4x4 prevViewProj; // previous frame's view-projection
+    // x = 1 when prevViewProj is valid; yz = fixed sub-pixel jitter in pixels;
+    // w = 1 when that fixed jitter must be used (DLSS supplies its own sequence
+    // and needs to know exactly which offset we rendered with).
+    float4 prevParams;
 };
 
 Texture2D    gTextures[] : register(t3);
@@ -113,6 +126,44 @@ float3 sampleCone(float3 dir, float cosThetaMax, inout uint s)
     return normalize(t * (sinT * cos(phi)) + b * (sinT * sin(phi)) + dir * cosT);
 }
 
+//---- GGX specular sampling --------------------------------------------------
+// Importance-sample the *visible* normal distribution (Heitz 2018). Sampling a
+// cone around the mirror direction instead, as this used to, ignores the shape
+// of the BRDF entirely and leaves glossy metal extremely noisy - which is what
+// makes those surfaces crawl once a denoiser tries to reconstruct them.
+float3 sampleGGXVNDF(float3 Ve, float alpha, float u1, float u2)
+{
+    // Stretch the view direction so the distribution becomes isotropic.
+    float3 Vh = normalize(float3(alpha * Ve.x, alpha * Ve.y, Ve.z));
+
+    float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
+    float3 T1 = (lensq > 0.0f) ? (float3(-Vh.y, Vh.x, 0.0f) * rsqrt(lensq))
+                               : float3(1.0f, 0.0f, 0.0f);
+    float3 T2 = cross(Vh, T1);
+
+    // Uniform point on the projected disk, warped to the visible hemisphere.
+    float r = sqrt(u1);
+    float phi = 6.2831853f * u2;
+    float t1 = r * cos(phi);
+    float t2 = r * sin(phi);
+    float sv = 0.5f * (1.0f + Vh.z);
+    t2 = (1.0f - sv) * sqrt(saturate(1.0f - t1 * t1)) + sv * t2;
+
+    float3 Nh = t1 * T1 + t2 * T2 +
+                sqrt(saturate(1.0f - t1 * t1 - t2 * t2)) * Vh;
+
+    // Unstretch to get the half vector.
+    return normalize(float3(alpha * Nh.x, alpha * Nh.y, max(0.0f, Nh.z)));
+}
+
+// Smith masking term for GGX, used as the VNDF estimator weight.
+float smithG1(float NdotX, float alpha)
+{
+    float a2 = alpha * alpha;
+    return 2.0f * NdotX /
+           max(NdotX + sqrt(a2 + (1.0f - a2) * NdotX * NdotX), 1e-6f);
+}
+
 float3 skyColor(float3 d)
 {
     // Equirectangular environment map when available.
@@ -150,6 +201,46 @@ float3 tonemap(float3 c)
     return pow(c, 1.0f / 2.2f);
 }
 
+//---- motion vectors ---------------------------------------------------------
+// Pixel-space motion vector: where this world point was on the previous frame's
+// screen, minus where it is now. This is the convention DLSS expects when
+// mvecScale is set to {1/width, 1/height}. Matrices carry no jitter.
+//
+// The current position must account for the sub-pixel offset the primary ray
+// actually used: worldPos lies along the *jittered* ray, so it reprojects to
+// pix + 0.5 + jitter, not to the pixel centre. Subtracting the centre instead
+// would bake the jitter into every motion vector and make a completely static
+// camera report movement, which shows up as the image shaking.
+float2 motionVector(float3 worldPos, uint2 pix, uint2 dim, float2 jit)
+{
+    if (prevParams.x < 0.5f) return float2(0.0f, 0.0f); // no history yet
+
+    float4 pc = mul(float4(worldPos, 1.0f), prevViewProj);
+    if (pc.w <= 0.0f) return float2(0.0f, 0.0f);        // behind the old camera
+
+    float2 pndc = pc.xy / pc.w;
+    float2 puv  = float2(pndc.x * 0.5f + 0.5f, 0.5f - pndc.y * 0.5f);
+    float2 ppix = puv * float2(dim);
+    return ppix - (float2(pix) + 0.5f + jit);
+}
+
+//---- linear depth -----------------------------------------------------------
+// DLSS's kBufferTypeLinearDepth means view-space Z: the distance along the
+// camera's forward axis, not the length of the ray. They differ by up to tens
+// of percent toward the edges of the screen, and feeding the ray length makes
+// DLSS misjudge disocclusion there and throw its history away.
+float3 cameraForward()
+{
+    float4 c = mul(float4(0.0f, 0.0f, 1.0f, 1.0f), invViewProj);
+    c /= c.w;
+    return normalize(c.xyz - cameraPos.xyz);
+}
+
+float linearDepthOf(float3 worldPos)
+{
+    return dot(worldPos - cameraPos.xyz, cameraForward());
+}
+
 //---- shadow ray -------------------------------------------------------------
 float traceShadow(float3 origin, float3 L)
 {
@@ -182,6 +273,14 @@ void RayGen()
     float3 origin = cameraPos.xyz;
     float3 dir = normalize(farW.xyz - origin);
 
+    // Unjittered centre ray, kept for background motion vectors (DLSS wants
+    // motion built from jitter-free matrices).
+    float2 cndc = float2((float(pix.x) + 0.5f) / float(dim.x) * 2.0f - 1.0f,
+                         1.0f - (float(pix.y) + 0.5f) / float(dim.y) * 2.0f);
+    float4 cfarW = mul(float4(cndc, 1.0f, 1.0f), invViewProj); cfarW /= cfarW.w;
+    float3 origin0 = cameraPos.xyz;
+    float3 dir0 = normalize(cfarW.xyz - origin0);
+
     //=====================================================================
     // Raytracing mode: direct light + hard shadow + sharp mirror reflection.
     // Deterministic (no random sampling), so it is clean every frame even
@@ -194,6 +293,10 @@ void RayGen()
         float3 geoN = float3(0, 0, 1);
         float  geoD = -1.0f;             // < 0 = background
         float3 geoAlb = float3(0, 0, 0);
+        float3 geoPos = float3(0, 0, 0); // primary-hit world position (motion vectors)
+        float  geoRough = 1.0f;          // primary-hit roughness  (DLSS guide buffers)
+        float3 geoSpec = float3(0, 0, 0);// primary-hit specular albedo (F0)
+        float  geoMetal = 0.0f;          // primary-hit metalness
         [loop]
         for (uint b = 0; b < maxDepth; ++b)
         {
@@ -204,7 +307,13 @@ void RayGen()
 
             radiance += tp * p.emissive; // glowing surfaces
             float3 N = p.normal, V = -dir;
-            if (b == 0u) { geoN = N; geoD = p.hitT; geoAlb = p.albedo; } // primary-hit G-buffer
+            if (b == 0u)                                   // primary-hit G-buffer
+            {
+                geoN = N; geoD = p.hitT; geoAlb = p.albedo; geoPos = p.worldPos;
+                geoRough = p.roughness;
+                geoSpec = lerp(float3(0.04f, 0.04f, 0.04f), p.albedo, p.metallic);
+                geoMetal = p.metallic;
+            }
             float3 L = normalize(-lightDir.xyz);
             float ndotl = saturate(dot(N, L));
             float vis = (ndotl > 0.0f) ? traceShadow(p.worldPos + N * 1e-2f, L) : 0.0f;
@@ -223,7 +332,21 @@ void RayGen()
             dir = reflect(dir, N);
         }
         gGeo[pix] = float4(geoN, geoD);
-        gAlbedo[pix] = float4(geoAlb, 1.0f);
+        // Diffuse albedo only: metals have no diffuse lobe, and their colour
+        // is already carried by the specular albedo. Handing the full base
+        // colour to both would make DLSS demodulate metal twice.
+        gAlbedo[pix] = float4(geoAlb * (1.0f - geoMetal), 1.0f);
+        // Background pixels still move when the camera turns: reproject a point
+        // far along the primary ray instead of a surface hit.
+        // Raytracing mode never jitters, so the offset is zero here.
+        gMotion[pix] = (geoD > 0.0f)
+            ? motionVector(geoPos, pix, dim, float2(0.0f, 0.0f))
+            : motionVector(origin0 + dir0 * 1e6f, pix, dim, float2(0.0f, 0.0f));
+        gNormalRough[pix] = float4(geoN, geoRough);
+        gSpecAlbedo[pix] = float4(geoSpec, 1.0f);
+        // View-space Z, and the far plane for sky so DLSS never sees a
+        // depth beyond the frustum it was told about.
+        gLinearDepth[pix] = (geoD > 0.0f) ? linearDepthOf(geoPos) : cameraPos.w;
         gOutput[pix] = float4(tonemap(radiance), 1.0f);
         return;
     }
@@ -235,15 +358,41 @@ void RayGen()
     //=====================================================================
     uint   spp = (uint)max(envParams.z, 1.0f);
     float3 radiance = float3(0, 0, 0);
-    float3 geoN = float3(0, 0, 1);
-    float  geoD = -1.0f;                 // < 0 = background
-    float3 geoAlb = float3(0, 0, 0);
-    bool   captured = false;
+
+    // Primary-hit surface data, summed over every sample that hit something and
+    // averaged at the end. Taking it from a single sample instead leaves the
+    // guide buffers as noisy as a 1-sample image no matter how many samples the
+    // lighting gets: the normal map is point-sampled at whatever sub-pixel
+    // position that one ray used, so it lands on a different texel each frame
+    // and DLSS sees the surface itself changing orientation.
+    float3 gnSum = float3(0, 0, 0);
+    float3 galbSum = float3(0, 0, 0);
+    float3 gspecSum = float3(0, 0, 0);
+    float3 gposSum = float3(0, 0, 0);
+    float2 gjitSum = float2(0, 0);
+    float  gdSum = 0.0f, groughSum = 0.0f, gmetalSum = 0.0f;
+    uint   gcount = 0;
 
     for (uint sp = 0; sp < spp; ++sp)
     {
-        // Per-sample primary ray (own sub-pixel jitter for anti-aliasing).
-        float2 jit = float2(rnd(s), rnd(s)) - 0.5f;
+        // Per-sample primary ray offset.
+        //   Without DLSS: an independent random offset per sample (plain AA).
+        //   With DLSS: centred on the offset DLSS was told about. Taking every
+        //     sample at that exact point leaves texture and normal-map detail
+        //     unfiltered, so it aliases differently each frame and the surface
+        //     appears to crawl; spreading the samples symmetrically around the
+        //     reported offset filters that detail within the frame while the
+        //     mean still matches what DLSS expects.
+        float2 jit;
+        if (prevParams.w > 0.5f)
+        {
+            jit = prevParams.yz;
+            if (spp > 1u) jit += float2(rnd(s), rnd(s)) - 0.5f;
+        }
+        else
+        {
+            jit = float2(rnd(s), rnd(s)) - 0.5f;
+        }
         float2 suv = (float2(pix) + 0.5f + jit) / float2(dim);
         float2 sndc = float2(suv.x * 2.0f - 1.0f, 1.0f - suv.y * 2.0f);
         float4 sfarW = mul(float4(sndc, 1.0f, 1.0f), invViewProj); sfarW /= sfarW.w;
@@ -270,9 +419,17 @@ void RayGen()
 
             float3 N = p.normal;
             float3 V = -sDir;
-            if (b == 0u && !captured)        // primary-hit G-buffer (first sample)
+            if (b == 0u)                     // primary hit: feed the guide buffers
             {
-                geoN = N; geoD = p.hitT; geoAlb = p.albedo; captured = true;
+                gnSum += N;
+                gdSum += p.hitT;
+                galbSum += p.albedo;
+                gposSum += p.worldPos;
+                groughSum += p.roughness;
+                gspecSum += lerp(float3(0.04f, 0.04f, 0.04f), p.albedo, p.metallic);
+                gmetalSum += p.metallic;
+                gjitSum += jit;              // offset this sample was traced with
+                ++gcount;
             }
 
             // Direct light with a soft (sampled) sun direction.
@@ -295,12 +452,22 @@ void RayGen()
             float3 newDir;
             if (rnd(s) < pSpec)
             {
-                float3 R = reflect(sDir, N);
-                float a2 = p.roughness * p.roughness;
-                float cosMax = lerp(0.99999f, 0.60f, a2);
-                newDir = sampleCone(R, cosMax, s);
-                if (dot(newDir, N) <= 0.0f) break;
-                throughput *= F / pSpec;
+                // Sample a half vector from the visible normal distribution,
+                // reflect about it, and weight by the Smith masking term - the
+                // estimator for VNDF sampling reduces to F * G1(L).
+                float alpha = max(p.roughness * p.roughness, 1e-3f);
+                float3 T, B; basis(N, T, B);
+                float3 Vt = float3(dot(V, T), dot(V, B), dot(V, N));
+                float3 Ht = sampleGGXVNDF(Vt, alpha, rnd(s), rnd(s));
+                float3 H = normalize(Ht.x * T + Ht.y * B + Ht.z * N);
+
+                newDir = reflect(-V, H);
+                float NdotL = dot(N, newDir);
+                if (NdotL <= 0.0f) break;
+
+                float3 Fh = F0 + (1.0f - F0) *
+                            pow(saturate(1.0f - saturate(dot(V, H))), 5.0f);
+                throughput *= Fh * smithG1(NdotL, alpha) / pSpec;
             }
             else
             {
@@ -330,6 +497,31 @@ void RayGen()
     }
     radiance /= float(spp);
 
+    // ---- resolve the guide buffers -----------------------------------------
+    // Averaging over the samples that hit gives DLSS a filtered view of the
+    // surface, so normal-map and texture detail stops flickering between
+    // frames. gcount == 0 means every sample missed: a background pixel.
+    float3 geoN = float3(0, 0, 1);
+    float  geoD = -1.0f;                 // < 0 = background
+    float3 geoAlb = float3(0, 0, 0);
+    float3 geoPos = float3(0, 0, 0);
+    float  geoRough = 1.0f;
+    float3 geoSpec = float3(0, 0, 0);
+    float  geoMetal = 0.0f;
+    float2 geoJit = float2(0, 0);
+    if (gcount > 0u)
+    {
+        float inv = 1.0f / float(gcount);
+        geoN = normalize(gnSum * inv);
+        geoD = gdSum * inv;
+        geoAlb = galbSum * inv;
+        geoPos = gposSum * inv;
+        geoRough = groughSum * inv;
+        geoSpec = gspecSum * inv;
+        geoMetal = gmetalSum * inv;
+        geoJit = gjitSum * inv;
+    }
+
     // ---- temporal accumulation ---------------------------------------------
     uint acc = frame.z;
     float3 prev = (acc == 0u) ? float3(0, 0, 0) : gAccum[pix].rgb;
@@ -337,7 +529,19 @@ void RayGen()
     gAccum[pix] = float4(sum, 1.0f);
 
     gGeo[pix] = float4(geoN, geoD);
-    gAlbedo[pix] = float4(geoAlb, 1.0f);
+    // Diffuse albedo only: metals have no diffuse lobe, and their colour is
+    // already carried by the specular albedo. Handing the full base colour to
+    // both would make DLSS demodulate metal twice.
+    gAlbedo[pix] = float4(geoAlb * (1.0f - geoMetal), 1.0f);
+    // Background reprojects a far point along the unjittered centre ray, so it
+    // carries no offset; surfaces use the jitter their primary ray was traced
+    // with.
+    gMotion[pix] = (geoD > 0.0f)
+        ? motionVector(geoPos, pix, dim, geoJit)
+        : motionVector(origin0 + dir0 * 1e6f, pix, dim, float2(0.0f, 0.0f));
+    gNormalRough[pix] = float4(geoN, geoRough);
+    gSpecAlbedo[pix] = float4(geoSpec, 1.0f);
+    gLinearDepth[pix] = (geoD > 0.0f) ? linearDepthOf(geoPos) : cameraPos.w;
 
     float3 avg = sum / float(acc + 1u);
     gOutput[pix] = float4(tonemap(avg), 1.0f);
