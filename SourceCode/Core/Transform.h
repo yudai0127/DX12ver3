@@ -18,6 +18,7 @@ public:
     XMFLOAT3 GetRotation() const { return m_rotation; }
 
     void     SetScale(float x, float y, float z) { m_scale = { x, y, z };    m_dirty = true; }
+    void     SetScale(XMFLOAT3 scale) { m_scale = scale;        m_dirty = true; }
     void     SetScale(float uniform) { SetScale(uniform, uniform, uniform); }
     XMFLOAT3 GetScale() const { return m_scale; }
 

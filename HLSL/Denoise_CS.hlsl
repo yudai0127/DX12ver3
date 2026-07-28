@@ -2,18 +2,24 @@
 // Denoise_CS.hlsl
 //   SVGF-style denoiser for the path tracer:
 //     1. Demodulate albedo so texture detail is preserved.
-//     2. Edge-aware spatial bilateral blur (normal + depth guided) to clean the
-//        current frame *first* -- this is what the temporal step then trusts.
-//     3. Temporal accumulation: reproject through the previous frame's view-proj
-//        and accept the history only when its stored WORLD POSITION matches
-//        (geometry-based rejection, robust to camera motion -- unlike a colour
-//        clamp, it doesn't re-inject the current frame's noise into history).
+//     2. Sparse three-ring bilateral blur (normal + depth guided). The rings
+//        stride outward so the kernel covers a wide area with few taps, which
+//        is what removes the low-frequency blotches a small dense kernel
+//        leaves behind - blotches that shift every frame and read as the
+//        surface crawling.
+//     3. Temporal accumulation: follow the motion vector, fetch the history
+//        bilinearly, and validate each of the four taps with a plane-distance
+//        test. Distance *along the surface normal* ignores the in-plane and
+//        along-ray jitter that made an absolute distance test flip between
+//        accept and reject each frame (another source of crawl), while still
+//        catching true disocclusion. Weights blend smoothly instead of
+//        all-or-nothing.
 //     4. Re-modulate the albedo and tonemap to the LDR output.
 //=============================================================================
 
 Texture2D<float4>   gInColor   : register(t0); // HDR accumulated sum (gAccum)
 Texture2D<float4>   gInGeo     : register(t1); // normal.xyz + depth.w (hitT)
-Texture2D<float4>   gInAlbedo  : register(t2); // primary-hit base color
+Texture2D<float4>   gInAlbedo  : register(t2); // primary-hit diffuse albedo
 Texture2D<float4>   gHistColor : register(t3); // last frame: lighting.rgb + len.a
 Texture2D<float4>   gHistGeo   : register(t4); // last frame: world position.xyz
 Texture2D<float2>   gMotion    : register(t5); // pixel-space motion (prev - cur)
@@ -25,16 +31,21 @@ cbuffer DenoiseCB : register(b0)
 {
     uint2  gDim;          // image size
     uint   gSampleCount;  // accumulated samples (acc + 1), to average the sum
-    int    gRadius;       // filter radius in pixels (0 = passthrough)
+    int    gRadius;       // ring stride scale (0 = denoiser disabled by C++)
 
     float  gExposure;     // tonemap exposure
     float  gNormalPower;  // normal edge sharpness
     float  gDepthSigma;   // relative depth tolerance
     float  gTemporalAlpha;// min blend toward the current frame (0 = full history)
 
-    row_major float4x4 gInvViewProj;  // current: reconstruct world pos from depth
-    row_major float4x4 gPrevViewProj; // previous frame: reproject to its screen
-    float4 gCameraPos;                 // current camera position (world)
+    // Camera basis rather than an inverse matrix: reconstructing positions by
+    // inverse-projecting the far plane is badly conditioned at this near/far
+    // ratio, and the resulting wobble fed straight into the history's plane
+    // test, flipping it between accept and reject each frame.
+    float4 gCamRight;   // xyz = right, w = tan(fovY/2) * aspect
+    float4 gCamUp;      // xyz = up,    w = tan(fovY/2)
+    float4 gCamFwd;     // xyz = forward
+    float4 gCameraPos;  // current camera position (world)
 
     int    gTemporalValid; // 1 = history is usable this frame
     float  gPad0, gPad1, gPad2;
@@ -53,10 +64,17 @@ float3 worldPosOf(int2 p, float depth)
 {
     float2 uv  = (float2(p) + 0.5f) / float2(gDim);
     float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-    float4 farW = mul(float4(ndc, 1.0f, 1.0f), gInvViewProj);
-    farW /= farW.w;
-    float3 rayDir = normalize(farW.xyz - gCameraPos.xyz);
+    float3 rayDir = normalize(gCamFwd.xyz
+                            + gCamRight.xyz * (ndc.x * gCamRight.w)
+                            + gCamUp.xyz    * (ndc.y * gCamUp.w));
     return gCameraPos.xyz + rayDir * depth;
+}
+
+// Demodulated lighting at a pixel. Colour, albedo and geometry buffers all
+// hold running means over the accumulated frames, so they are used directly.
+float3 lightAt(int2 q)
+{
+    return gInColor[q].rgb / max(gInAlbedo[q].rgb, 0.04f);
 }
 
 [numthreads(8, 8, 1)]
@@ -65,91 +83,123 @@ void main(uint3 tid : SV_DispatchThreadID)
     if (tid.x >= gDim.x || tid.y >= gDim.y) return;
     int2 p = int2(tid.xy);
 
-    float  invS = 1.0f / max((float)gSampleCount, 1.0f);
-    float4 cGeo = gInGeo[p];
-    float3 cN   = cGeo.xyz;
+    float4 cGeo = gInGeo[p];              // running means; renormalise the normal
+    float3 cN   = normalize(cGeo.xyz);
     float  cD   = cGeo.w;
 
     // Background: no denoise, just tonemap the environment colour.
     if (cD <= 0.0f)
     {
-        gOut[p]          = float4(tonemap(gInColor[p].rgb * invS), 1.0f);
+        gOut[p]          = float4(tonemap(gInColor[p].rgb), 1.0f);
         gHistColorOut[p] = float4(0.0f, 0.0f, 0.0f, 0.0f);
         gHistGeoOut[p]   = float4(0.0f, 0.0f, 0.0f, 0.0f);
         return;
     }
 
-    // Albedo demodulation: filter only the *lighting* (colour / albedo) so the
-    // texture detail (albedo) is preserved, then modulate back.
     float3 cAlbedo = max(gInAlbedo[p].rgb, 0.04f);
-    float3 center  = (gInColor[p].rgb * invS) / cAlbedo; // demodulated lighting
+    float3 center  = lightAt(p);
 
-    // ---- (2) spatial bilateral blur: clean the current frame ---------------
+    // ---- (2) sparse three-ring bilateral blur ------------------------------
+    // Ring strides grow with gRadius, so radius 2 covers ~10 pixels while the
+    // tap count stays at 25.
+    static const int2 kRing[8] = {
+        int2(-1, -1), int2(0, -1), int2(1, -1),
+        int2(-1,  0),              int2(1,  0),
+        int2(-1,  1), int2(0,  1), int2(1,  1)
+    };
+    const int   stride[3]     = { 1, 1 + gRadius, 1 + 2 * gRadius };
+    const float ringWeight[3] = { 1.0f, 0.55f, 0.3f };
+
     float3 sum  = center;
     float  wsum = 1.0f;
-    if (gRadius > 0)
+
+    [unroll]
+    for (int r = 0; r < 3; ++r)
     {
-        for (int dy = -gRadius; dy <= gRadius; ++dy)
-        for (int dx = -gRadius; dx <= gRadius; ++dx)
+        [unroll]
+        for (int k = 0; k < 8; ++k)
         {
-            if (dx == 0 && dy == 0) continue;
-            int2 q = p + int2(dx, dy);
-            if (q.x < 0 || q.y < 0 || q.x >= (int)gDim.x || q.y >= (int)gDim.y) continue;
+            int2 q = p + kRing[k] * stride[r];
+            if (q.x < 0 || q.y < 0 || q.x >= (int)gDim.x || q.y >= (int)gDim.y)
+                continue;
 
             float4 qGeo = gInGeo[q];
             if (qGeo.w <= 0.0f) continue; // skip background neighbours
+            float3 qN = normalize(qGeo.xyz);
+            float  qD = qGeo.w;
 
-            float3 qAlbedo = max(gInAlbedo[q].rgb, 0.04f);
-            float3 qLight  = (gInColor[q].rgb * invS) / qAlbedo;
+            float wN = pow(saturate(dot(cN, qN)), gNormalPower);
+            float wD = exp(-abs(cD - qD) / max(gDepthSigma * cD, 1e-3f));
+            float w  = wN * wD * ringWeight[r];
 
-            float wN = pow(saturate(dot(cN, qGeo.xyz)), gNormalPower);
-            float wD = exp(-abs(cD - qGeo.w) / max(gDepthSigma * cD, 1e-3f));
-            float wS = exp(-(float)(dx * dx + dy * dy) /
-                           (2.0f * (float)(gRadius * gRadius)));
-            float w = wN * wD * wS;
-
-            sum  += qLight * w;
+            sum  += lightAt(q) * w;
             wsum += w;
         }
     }
     float3 curLight = sum / max(wsum, 1e-4f);
 
-    // ---- (3) temporal accumulation with geometry-based rejection -----------
+    // ---- (3) temporal accumulation ------------------------------------------
     float3 worldPos = worldPosOf(p, cD);
 
     float3 histLight = curLight;
     float  histLen   = 0.0f;
-    bool   accepted  = false;
 
     if (gTemporalValid != 0)
     {
-        // Follow the motion vector the ray tracer wrote (same buffer DLSS will
-        // consume), instead of reprojecting again here.
+        // Follow the motion vector, then fetch the 2x2 history footprint with
+        // bilinear weights, validating every tap against this pixel's surface
+        // plane. Partial acceptance replaces the old accept/reject cliff.
         float2 prevPix = (float2(p) + 0.5f) + gMotion[p];
-        if (prevPix.x >= 0.0f && prevPix.y >= 0.0f &&
-            prevPix.x < (float)gDim.x && prevPix.y < (float)gDim.y)
-        {
-            int2 hp = clamp(int2(prevPix), int2(0, 0), int2(gDim) - int2(1, 1));
+        float2 base = floor(prevPix - 0.5f);
+        float2 f = (prevPix - 0.5f) - base;
+        const float cornerW[4] = {
+            (1.0f - f.x) * (1.0f - f.y),
+            f.x * (1.0f - f.y),
+            (1.0f - f.x) * f.y,
+            f.x * f.y
+        };
+        const int2 cornerO[4] = { int2(0,0), int2(1,0), int2(0,1), int2(1,1) };
 
-            float3 hPos = gHistGeo[hp].xyz;
-            // Accept only if the reprojected pixel is the same surface point.
-            float  thresh = max(0.02f * cD, 0.5f);
-            if (length(hPos - worldPos) < thresh)
-            {
-                float4 hc = gHistColor[hp];
-                histLight = hc.rgb;
-                histLen   = hc.a;
-                accepted  = true;
-            }
+        // Distance measured along the normal tolerates the jitter-driven noise
+        // in the reconstructed position (which lies mostly in-plane or along
+        // the view ray) but still trips on genuine occlusion changes.
+        const float planeTol = max(0.01f * cD, 0.05f);
+
+        float3 hCol = 0.0f;
+        float  hLen = 0.0f, hW = 0.0f;
+        [unroll]
+        for (int i = 0; i < 4; ++i)
+        {
+            int2 hp = int2(base) + cornerO[i];
+            if (hp.x < 0 || hp.y < 0 || hp.x >= (int)gDim.x || hp.y >= (int)gDim.y)
+                continue;
+
+            float4 hg = gHistGeo[hp];
+            if (hg.w <= 0.0f) continue;    // background last frame
+
+            float planeDist = abs(dot(cN, hg.xyz - worldPos));
+            if (planeDist >= planeTol) continue;
+
+            float w = cornerW[i];
+            float4 hc = gHistColor[hp];
+            hCol += hc.rgb * w;
+            hLen += hc.a * w;
+            hW   += w;
+        }
+
+        if (hW > 0.05f)
+        {
+            histLight = hCol / hW;
+            histLen   = hLen / hW;
         }
     }
 
-    // On acceptance, blend as an exponential moving average (trust current more
-    // early on, settle to a small blend once history is long). On rejection
-    // (disocclusion / first frame), start fresh from the current frame.
-    float  alpha    = accepted ? max(gTemporalAlpha, 1.0f / (histLen + 1.0f)) : 1.0f;
+    // Exponential moving average: trust the current frame while history is
+    // short, settle to a small stable blend once it is long. A rejected
+    // history leaves histLen at 0, which makes alpha 1 automatically.
+    float  alpha    = max(gTemporalAlpha, 1.0f / (histLen + 1.0f));
     float3 outLight = lerp(histLight, curLight, alpha);
-    float  newLen   = accepted ? min(histLen + 1.0f, 64.0f) : 1.0f;
+    float  newLen   = min(histLen + 1.0f, 64.0f);
 
     gHistColorOut[p] = float4(outLight, newLen);
     gHistGeoOut[p]   = float4(worldPos, 1.0f);

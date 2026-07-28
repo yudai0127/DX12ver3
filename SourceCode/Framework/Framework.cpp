@@ -15,6 +15,8 @@
 #include "Component/MeshRenderer.h"
 #include "Component/ModelRenderer.h"
 #include "Camera/Camera.h"
+#include "Core/Scene.h"
+#include "Core/GameObject.h"
 
 //=============================================================================
 //  ゲーム処理（Initialize / Update / Render / Uninitialize）
@@ -36,6 +38,7 @@ void Framework::Initialize()
     GameObject* model = m_scene->CreateObject("GltfModel");
     ModelRenderer* mr =
         model->AddComponent<ModelRenderer>("Resources/Dragon/Dragon_knight_UE4.gltf");
+ 
     mr->SetColor(0.8f, 0.8f, 0.8f, 1.0f);
 
     // スプライトを表示
@@ -114,6 +117,52 @@ void Framework::Render(float elapsedTime)
     ImGui::Separator();
     if (m_raytracer.IsValid())
     {
+    // ---- Transform editor -------------------------------------------
+    //   Editing a transform moves the object in both paths: the rasterizer
+    //   picks it up through the world matrix, and the ray tracer rebuilds its
+    //   top-level acceleration structure the same frame.
+    if (m_scene && ImGui::CollapsingHeader("Objects"))
+    {
+        const auto& objects = m_scene->GetObjects();
+        for (size_t i = 0; i < objects.size(); ++i)
+        {
+            GameObject* obj = objects[i].get();
+            if (!obj) continue;
+            Transform* tr = obj->GetTransform();
+            if (!tr) continue;
+
+            ImGui::PushID((int)i);
+            if (ImGui::TreeNode(obj->GetName().c_str()))
+            {
+                XMFLOAT3 p = tr->GetPosition();
+                if (ImGui::DragFloat3("Position", &p.x, 0.5f))
+                    tr->SetPosition(p);
+
+                XMFLOAT3 r = tr->GetRotation();
+                if (ImGui::DragFloat3("Rotation", &r.x, 1.0f))
+                    tr->SetRotation(r);
+
+                XMFLOAT3 s = tr->GetScale();
+                if (ImGui::DragFloat3("Scale", &s.x, 0.01f, 0.01f, 100.0f))
+                    tr->SetScale(s);
+
+                // Uniform scaling is the common case, so give it its own slider.
+                float uniform = s.x;
+                if (ImGui::DragFloat("Scale (uniform)", &uniform, 0.01f, 0.01f, 100.0f))
+                    tr->SetScale(uniform);
+
+                if (ImGui::Button("Reset"))
+                {
+                    tr->SetPosition(0.0f, 0.0f, 0.0f);
+                    tr->SetRotation(0.0f, 0.0f, 0.0f);
+                    tr->SetScale(1.0f);
+                }
+                ImGui::TreePop();
+            }
+            ImGui::PopID();
+        }
+    }
+
         const char* modes[] = { "Rasterizer", "Raytracing", "Path Tracing" };
         ImGui::Combo("Render Mode [F6]", &m_renderMode, modes, 3);
         if (m_renderMode != 0)
@@ -141,6 +190,8 @@ void Framework::Render(float elapsedTime)
                                     m_raytracer.WasDLSSActive() ? "active" : "FAILED (fallback)");
                         ImGui::TextDisabled("Render Scale is ignored while DLSS is on");
                         ImGui::Checkbox("DLSS Jitter", &m_raytracer.dlssJitter);
+                        ImGui::Checkbox("Invert Motion Vectors (diagnostic)",
+                                        &m_raytracer.dlssInvertMotion);
                     }
                 }
             }

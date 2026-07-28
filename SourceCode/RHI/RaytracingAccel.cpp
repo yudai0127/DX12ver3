@@ -188,6 +188,44 @@ namespace RaytracingAccel
         return out;
     }
 
+    bool RebuildTopLevel(
+        ID3D12GraphicsCommandList4* cmd,
+        AccelBuffers& tlas,
+        const std::vector<D3D12_RAYTRACING_INSTANCE_DESC>& instances)
+    {
+        if (!cmd || instances.empty() || !tlas.IsValid() ||
+            !tlas.instanceDesc || !tlas.scratch)
+        {
+            return false;
+        }
+
+        // Overwrite the instance descriptors in place.
+        const UINT64 instBytes =
+            sizeof(D3D12_RAYTRACING_INSTANCE_DESC) * instances.size();
+        void* mapped = nullptr;
+        D3D12_RANGE noRead = { 0, 0 };
+        if (FAILED(tlas.instanceDesc->Map(0, &noRead, &mapped)) || !mapped)
+            return false;
+        memcpy(mapped, instances.data(), instBytes);
+        tlas.instanceDesc->Unmap(0, nullptr);
+
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {};
+        inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+        inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        inputs.NumDescs = static_cast<UINT>(instances.size());
+        inputs.InstanceDescs = tlas.instanceDesc->GetGPUVirtualAddress();
+
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC build = {};
+        build.Inputs = inputs;
+        build.ScratchAccelerationStructureData = tlas.scratch->GetGPUVirtualAddress();
+        build.DestAccelerationStructureData = tlas.result->GetGPUVirtualAddress();
+
+        cmd->BuildRaytracingAccelerationStructure(&build, 0, nullptr);
+        InsertUavBarrier(cmd, tlas.result.Get());
+        return true;
+    }
+
     void FillInstanceTransform(float dst[3][4], const float src[4][4])
     {
         // src is row-vector (v' = v * M): translation lives in row 3.

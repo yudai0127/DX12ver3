@@ -52,7 +52,7 @@ public:
         std::vector<int> children;
 
         DirectX::XMFLOAT4 rotation = { 0, 0, 0, 1 };
-        DirectX::XMFLOAT3 scale = { 1, 1, 1 };
+        DirectX::XMFLOAT3 scale = { 20, 20, 20 };
         DirectX::XMFLOAT3 translation = { 0, 0, 0 };
         DirectX::XMFLOAT4X4 global_transform =
         { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };

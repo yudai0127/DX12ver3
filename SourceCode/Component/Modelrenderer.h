@@ -28,6 +28,7 @@ public:
         m_color = { r, g, b, a };
     }
 
+    
     static void SetCamera(Camera* camera) { s_camera = camera; }
 
     /// @brief シェーダーを再コンパイル（ホットリロード）

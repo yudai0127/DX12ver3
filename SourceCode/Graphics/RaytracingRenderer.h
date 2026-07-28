@@ -15,6 +15,7 @@ using Microsoft::WRL::ComPtr;
 
 class Scene;
 class Camera;
+class ModelRenderer;
 
 //-----------------------------------------------------------------------------
 // RaytracingRenderer  (DXR milestone 1)
@@ -99,6 +100,11 @@ public:
     // only as a way to rule the jitter out when chasing temporal artefacts.
     bool dlssJitter = true;
 
+    // Diagnostic: flip the motion vector direction reported to DLSS.
+    // Static frames cannot tell the two conventions apart (the vectors
+    // are zero), so this only shows itself while the camera moves.
+    bool dlssInvertMotion = false;
+
     // True when DLSS actually ran on the last frame (the UI reports this, so a
     // silent fallback to the built-in path is visible).
     bool WasDLSSActive() const { return m_dlssActive; }
@@ -122,6 +128,9 @@ private:
         DirectX::XMUINT4    frame;
         DirectX::XMFLOAT4   envParams; // x = env tex index (-1 = none), y = intensity, z = spp
         DirectX::XMFLOAT4X4 prevViewProj; // previous frame (motion vectors)
+        DirectX::XMFLOAT4   camRight;     // xyz = right, w = tanHalfFov * aspect
+        DirectX::XMFLOAT4   camUp;        // xyz = up,    w = tanHalfFov
+        DirectX::XMFLOAT4   camFwd;       // xyz = forward
         DirectX::XMFLOAT4   prevParams;   // x = 1 when prevViewProj is valid
     };
 
@@ -180,6 +189,21 @@ private:
     std::vector<RaytracingAccel::AccelBuffers> m_blas;
     RaytracingAccel::AccelBuffers              m_tlas;
     std::vector<HitRecordData>                 m_hitData;
+
+    // What each TLAS instance is placed by, so its transform can be recomputed
+    // when the object moves. The geometry itself never changes, so only the
+    // top level has to be rebuilt - the BLAS stay as they are.
+    struct InstanceSource
+    {
+        ModelRenderer*      renderer = nullptr; // null for the procedural floor
+        DirectX::XMFLOAT4X4 nodeTransform{};    // node transform inside the model
+    };
+    std::vector<InstanceSource>                      m_instanceSrc;
+    std::vector<D3D12_RAYTRACING_INSTANCE_DESC>      m_instanceDescs;
+    std::vector<DirectX::XMFLOAT4X4>                 m_prevWorld; // change detection
+
+    // True when an object's transform differs from the one baked into the TLAS.
+    bool InstancesNeedRebuild() const;
 
     // Procedural reflective floor geometry (kept alive for BLAS use).
     ComPtr<ID3D12Resource> m_floorVB;

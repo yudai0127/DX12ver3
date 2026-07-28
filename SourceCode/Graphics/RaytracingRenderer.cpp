@@ -35,8 +35,9 @@ namespace
         float            depthSigma;
         float            temporalAlpha;
 
-        DirectX::XMFLOAT4X4 invViewProj;   // current frame (reconstruct world pos)
-        DirectX::XMFLOAT4X4 prevViewProj;  // previous frame (reproject history)
+        DirectX::XMFLOAT4   camRight;      // xyz = right, w = tanHalfFov * aspect
+        DirectX::XMFLOAT4   camUp;         // xyz = up,    w = tanHalfFov
+        DirectX::XMFLOAT4   camFwd;        // xyz = forward
         DirectX::XMFLOAT4   cameraPos;
 
         int32_t          temporalValid;    // 1 = history usable this frame
@@ -357,6 +358,13 @@ bool RaytracingRenderer::BuildAccelerationStructures(Scene* scene)
                 inst.AccelerationStructure = blas.Address();
                 instances.push_back(inst);
 
+                // Remember how this instance was placed so it can be moved
+                // later without touching the geometry.
+                InstanceSource src;
+                src.renderer = mr;
+                src.nodeTransform = node.global_transform;
+                m_instanceSrc.push_back(src);
+
                 HitRecordData hd;
                 hd.vbAddress = prim.vbView.BufferLocation;
                 hd.ibAddress = prim.ibView.BufferLocation;
@@ -447,6 +455,11 @@ bool RaytracingRenderer::BuildAccelerationStructures(Scene* scene)
                 inst.AccelerationStructure = blas.Address();
                 instances.push_back(inst);
 
+                // The floor is static: no renderer drives it.
+                InstanceSource fsrc;
+                XMStoreFloat4x4(&fsrc.nodeTransform, XMMatrixIdentity());
+                m_instanceSrc.push_back(fsrc);
+
                 HitRecordData hd;
                 hd.vbAddress = m_floorVB->GetGPUVirtualAddress();
                 hd.ibAddress = m_floorIB->GetGPUVirtualAddress();
@@ -468,6 +481,7 @@ bool RaytracingRenderer::BuildAccelerationStructures(Scene* scene)
         return false;
     }
 
+    m_instanceDescs = instances;   // kept so instances can be moved later
     m_tlas = RaytracingAccel::BuildTopLevel(dev5, cmd4, instances);
     cmdCtx.ExecuteAndWait();
 
@@ -931,6 +945,22 @@ void RaytracingRenderer::Resize(uint32_t width, uint32_t height)
 }
 
 //-----------------------------------------------------------------------------
+// InstancesNeedRebuild  -  has any object moved since the TLAS was built?
+//-----------------------------------------------------------------------------
+bool RaytracingRenderer::InstancesNeedRebuild() const
+{
+    if (m_prevWorld.size() != m_instanceSrc.size()) return true;
+
+    for (size_t i = 0; i < m_instanceSrc.size(); ++i)
+    {
+        if (!m_instanceSrc[i].renderer) continue;   // static geometry
+        XMFLOAT4X4 w = m_instanceSrc[i].renderer->GetWorldMatrix();
+        if (memcmp(&w, &m_prevWorld[i], sizeof(XMFLOAT4X4)) != 0) return true;
+    }
+    return false;
+}
+
+//-----------------------------------------------------------------------------
 // Render  -  dispatch rays, denoise, upscale, and copy to the back buffer.
 //-----------------------------------------------------------------------------
 void RaytracingRenderer::Render(const Camera& camera)
@@ -941,6 +971,30 @@ void RaytracingRenderer::Render(const Camera& camera)
     auto& cmdCtx = dm->GetCommand();
     ID3D12GraphicsCommandList4* cmd4 = cmdCtx.GetCommandList4();
     if (!cmd4) return;
+
+    // ---- keep the TLAS in step with the scene ------------------------
+    // Moving, rotating or scaling an object only changes where its geometry
+    // sits, so the BLAS stay untouched and the top level is rebuilt in place.
+    if (InstancesNeedRebuild())
+    {
+        m_prevWorld.resize(m_instanceSrc.size());
+        for (size_t i = 0; i < m_instanceSrc.size(); ++i)
+        {
+            if (!m_instanceSrc[i].renderer) continue;
+
+            XMFLOAT4X4 world = m_instanceSrc[i].renderer->GetWorldMatrix();
+            m_prevWorld[i] = world;
+
+            XMMATRIX instM = XMLoadFloat4x4(&m_instanceSrc[i].nodeTransform) *
+                             XMLoadFloat4x4(&world);
+            XMFLOAT4X4 instWorld;
+            XMStoreFloat4x4(&instWorld, instM);
+            RaytracingAccel::FillInstanceTransform(
+                m_instanceDescs[i].Transform, instWorld.m);
+        }
+        RaytracingAccel::RebuildTopLevel(cmd4, m_tlas, m_instanceDescs);
+        m_accumIndex = 0;    // the image changed; start accumulating again
+    }
 
     // Every per-pixel buffer is allocated at the full output size; a lower
     // render scale simply uses the top-left sub-rectangle of them. That keeps
@@ -1004,6 +1058,24 @@ void RaytracingRenderer::Render(const Camera& camera)
     sc.envParams = XMFLOAT4((float)m_envTexIndex, envIntensity, (float)spp, 0.0f);
     sc.prevViewProj = m_prevViewProj;
 
+    // Camera basis for exact primary rays. Inverse-projecting the far plane
+    // instead loses precision badly at a 0.01/400 near-far ratio, and that
+    // error becomes a wobble in the ray directions as the camera moves.
+    {
+        XMVECTOR fwdV   = XMVector3Normalize(XMVectorSubtract(focus, eye));
+        XMVECTOR rightV = XMVector3Normalize(XMVector3Cross(up, fwdV));
+        XMVECTOR upV    = XMVector3Cross(fwdV, rightV);
+        XMFLOAT3 f3, r3, u3;
+        XMStoreFloat3(&f3, fwdV);
+        XMStoreFloat3(&r3, rightV);
+        XMStoreFloat3(&u3, upV);
+
+        const float tanHalf = tanf(XMConvertToRadians(camera.fovDegree) * 0.5f);
+        sc.camRight = XMFLOAT4(r3.x, r3.y, r3.z, tanHalf * aspect);
+        sc.camUp    = XMFLOAT4(u3.x, u3.y, u3.z, tanHalf);
+        sc.camFwd   = XMFLOAT4(f3.x, f3.y, f3.z, 0.0f);
+    }
+
     // Under DLSS the whole frame is rendered with one known sub-pixel offset
     // (a Halton 2,3 sequence) which DLSS is told about, so it can resolve edges
     // across frames. Without DLSS each sample keeps its own random jitter.
@@ -1037,9 +1109,13 @@ void RaytracingRenderer::Render(const Camera& camera)
         m_hasPrevKey = true;
     }
 
-    // DLSS accumulates over time itself, so ours stays at zero and the ray
-    // tracer keeps emitting this frame's raw (noisy) radiance.
-    if (wantDLSS) m_accumIndex = 0;
+    // Accumulation now runs under DLSS too. RR has its own temporal history,
+    // but its GUIDE buffers (albedo, normal+roughness, depth) have none: fed
+    // fresh single-frame values they stay jitter-noisy forever, and RR
+    // remodulates its stabilised lighting with that noisy albedo every frame -
+    // the crawling that persisted even with a still camera. With the buffers
+    // holding running means, a still camera converges the guides and the
+    // colour input alike; any movement resets via ResetKey as usual.
 
     // frame: x = RNG seed, y = path depth, z = prior sample count, w = mode.
     sc.frame = XMUINT4(m_frameCounter++, (uint32_t)depth, m_accumIndex,
@@ -1088,8 +1164,9 @@ void RaytracingRenderer::Render(const Camera& camera)
         dc.normalPower = 32.0f;
         dc.depthSigma = 0.02f;
         dc.temporalAlpha = 0.1f;           // keep ~90% history once settled
-        dc.invViewProj = sc.invViewProj;
-        dc.prevViewProj = m_prevViewProj;
+        dc.camRight = sc.camRight;
+        dc.camUp = sc.camUp;
+        dc.camFwd = sc.camFwd;
         dc.cameraPos = sc.cameraPos;
         dc.temporalValid = m_hasPrevVP ? 1 : 0;
         m_denoiseCB.Update(dc);
@@ -1218,6 +1295,7 @@ void RaytracingRenderer::Render(const Camera& camera)
         f.jitter = XMFLOAT2(-jitter.x, -jitter.y);
         f.reset = !m_hasPrevVP;
         f.quality = quality;
+        f.invertMotion = dlssInvertMotion;
 
         m_dlssActive = DLSS::Instance().EvaluateRR(cmd4, f);
 

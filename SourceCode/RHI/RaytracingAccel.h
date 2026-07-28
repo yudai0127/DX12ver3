@@ -61,6 +61,16 @@ namespace RaytracingAccel
         ID3D12GraphicsCommandList4* cmd,
         const std::vector<D3D12_RAYTRACING_INSTANCE_DESC>& instances);
 
+    // Re-record a top-level build into buffers an earlier BuildTopLevel already
+    // produced, after overwriting their instance descriptors. Nothing is
+    // allocated, so this is safe to call whenever an object moves - which a
+    // fresh BuildTopLevel would not be, since it would leak a set of buffers
+    // per call. The instance count must match the original build.
+    bool RebuildTopLevel(
+        ID3D12GraphicsCommandList4* cmd,
+        AccelBuffers& tlas,
+        const std::vector<D3D12_RAYTRACING_INSTANCE_DESC>& instances);
+
     // Fill a D3D12 instance transform (3x4, column-vector / row-major) from a
     // DirectXMath-style row-vector 4x4 world matrix (m[row][col]). This applies
     // the transpose that converts between the two conventions.

@@ -48,6 +48,14 @@ cbuffer SceneCB : register(b0)
     uint4  frame;       // x=rng seed, y=maxDepth, z=accumIndex, w=render mode
     float4 envParams;   // x=env texture index (-1=none), y=intensity, z=samples/frame
     row_major float4x4 prevViewProj; // previous frame's view-projection
+    // Camera basis, used to build primary rays exactly. Reconstructing them by
+    // inverse-projecting the far plane loses catastrophic precision when the
+    // near/far ratio is large (0.01 to 400 here): the error lands in the ray
+    // direction, so the whole image shimmers as the camera moves. The
+    // rasteriser never shows it because it only ever uses forward transforms.
+    float4 camRight;  // xyz = right, w = tan(fovY/2) * aspect
+    float4 camUp;     // xyz = up,    w = tan(fovY/2)
+    float4 camFwd;    // xyz = forward
     // x = 1 when prevViewProj is valid; yz = fixed sub-pixel jitter in pixels;
     // w = 1 when that fixed jitter must be used (DLSS supplies its own sequence
     // and needs to know exactly which offset we rendered with).
@@ -164,6 +172,31 @@ float smithG1(float NdotX, float alpha)
            max(NdotX + sqrt(a2 + (1.0f - a2) * NdotX * NdotX), 1e-6f);
 }
 
+// Environment lookup for bounce rays, prefiltered by how blurry the path has
+// become. Reading the full-resolution map on every bounce makes glossy metal
+// extremely noisy: the specular lobe lands on a different bright texel each
+// sample, and that variance is exactly what breaks DLSS RR's reconstruction
+// (CAPCOM hit the same artefact on clothing speculars in RE ENGINE and
+// stabilised it by taking high-intensity IBL out of the per-sample estimator).
+// Sampling a mip that matches the lobe width integrates the environment
+// instead - slightly biased, dramatically calmer.
+float3 skyColorLod(float3 d, float rough)
+{
+    int envIdx = (int)envParams.x;
+    if (envIdx >= 0)
+    {
+        uint w, h, mips;
+        gTextures[envIdx].GetDimensions(0, w, h, mips);
+        float lod = sqrt(saturate(rough)) * (float)(mips - 1);
+        float u = atan2(d.z, d.x) * (0.5f / PI) + 0.5f;
+        float v = acos(clamp(d.y, -1.0f, 1.0f)) / PI;
+        return gTextures[envIdx].SampleLevel(gSampler, float2(u, v), lod).rgb * envParams.y;
+    }
+
+    float t = saturate(d.y * 0.5f + 0.5f);
+    return lerp(float3(0.03f, 0.04f, 0.06f), float3(0.25f, 0.38f, 0.55f), t);
+}
+
 float3 skyColor(float3 d)
 {
     // Equirectangular environment map when available.
@@ -201,6 +234,17 @@ float3 tonemap(float3 c)
     return pow(c, 1.0f / 2.2f);
 }
 
+//---- camera rays ------------------------------------------------------------
+// Exact primary ray for a pixel-space position, straight from the camera basis.
+float3 cameraRay(float2 pixPos, uint2 dim)
+{
+    float2 uv  = pixPos / float2(dim);
+    float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
+    return normalize(camFwd.xyz
+                   + camRight.xyz * (ndc.x * camRight.w)
+                   + camUp.xyz    * (ndc.y * camUp.w));
+}
+
 //---- motion vectors ---------------------------------------------------------
 // Pixel-space motion vector: where this world point was on the previous frame's
 // screen, minus where it is now. This is the convention DLSS expects when
@@ -229,12 +273,7 @@ float2 motionVector(float3 worldPos, uint2 pix, uint2 dim, float2 jit)
 // camera's forward axis, not the length of the ray. They differ by up to tens
 // of percent toward the edges of the screen, and feeding the ray length makes
 // DLSS misjudge disocclusion there and throw its history away.
-float3 cameraForward()
-{
-    float4 c = mul(float4(0.0f, 0.0f, 1.0f, 1.0f), invViewProj);
-    c /= c.w;
-    return normalize(c.xyz - cameraPos.xyz);
-}
+float3 cameraForward() { return camFwd.xyz; }
 
 float linearDepthOf(float3 worldPos)
 {
@@ -266,20 +305,13 @@ void RayGen()
 
     // Sub-pixel jitter for AA (path tracing only; raytracing stays noise-free).
     float2 jitter = (mode == 1u) ? (float2(rnd(s), rnd(s)) - 0.5f) : float2(0.0f, 0.0f);
-    float2 uv = (float2(pix) + 0.5f + jitter) / float2(dim);
-    float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-
-    float4 farW = mul(float4(ndc, 1.0f, 1.0f), invViewProj); farW /= farW.w;
     float3 origin = cameraPos.xyz;
-    float3 dir = normalize(farW.xyz - origin);
+    float3 dir = cameraRay(float2(pix) + 0.5f + jitter, dim);
 
     // Unjittered centre ray, kept for background motion vectors (DLSS wants
     // motion built from jitter-free matrices).
-    float2 cndc = float2((float(pix.x) + 0.5f) / float(dim.x) * 2.0f - 1.0f,
-                         1.0f - (float(pix.y) + 0.5f) / float(dim.y) * 2.0f);
-    float4 cfarW = mul(float4(cndc, 1.0f, 1.0f), invViewProj); cfarW /= cfarW.w;
     float3 origin0 = cameraPos.xyz;
-    float3 dir0 = normalize(cfarW.xyz - origin0);
+    float3 dir0 = cameraRay(float2(pix) + 0.5f, dim);
 
     //=====================================================================
     // Raytracing mode: direct light + hard shadow + sharp mirror reflection.
@@ -393,14 +425,16 @@ void RayGen()
         {
             jit = float2(rnd(s), rnd(s)) - 0.5f;
         }
-        float2 suv = (float2(pix) + 0.5f + jit) / float2(dim);
-        float2 sndc = float2(suv.x * 2.0f - 1.0f, 1.0f - suv.y * 2.0f);
-        float4 sfarW = mul(float4(sndc, 1.0f, 1.0f), invViewProj); sfarW /= sfarW.w;
         float3 sOrigin = cameraPos.xyz;
-        float3 sDir = normalize(sfarW.xyz - sOrigin);
+        float3 sDir = cameraRay(float2(pix) + 0.5f + jit, dim);
 
         float3 sampleRad = float3(0, 0, 0);
         float3 throughput = float3(1, 1, 1);
+
+        // How blurry the path has become: 0 while the ray is still the sharp
+        // primary ray, then widened by every lobe it scatters through. Drives
+        // the prefiltered environment lookup on miss.
+        float pathRough = 0.0f;
 
         [loop]
         for (uint b = 0; b < maxDepth; ++b)
@@ -411,7 +445,10 @@ void RayGen()
 
             if (p.hitT < 0.0f)
             {
-                sampleRad += throughput * skyColor(sDir);
+                // Primary rays keep the sharp background; bounce rays read the
+                // environment prefiltered to the width of the path's lobe.
+                sampleRad += throughput * ((b == 0u) ? skyColor(sDir)
+                                                     : skyColorLod(sDir, pathRough));
                 break;
             }
 
@@ -468,11 +505,18 @@ void RayGen()
                 float3 Fh = F0 + (1.0f - F0) *
                             pow(saturate(1.0f - saturate(dot(V, H))), 5.0f);
                 throughput *= Fh * smithG1(NdotL, alpha) / pSpec;
+
+                // A glossy bounce widens the path by its own lobe.
+                pathRough = min(1.0f, pathRough + p.roughness);
             }
             else
             {
                 newDir = cosineSample(N, s);
                 throughput *= (p.albedo * (1.0f - p.metallic)) / (1.0f - pSpec);
+
+                // A diffuse bounce scatters over the whole hemisphere; any
+                // environment detail beyond its average is pure variance.
+                pathRough = 1.0f;
             }
 
             sOrigin = p.worldPos + N * 1e-3f;
@@ -523,28 +567,58 @@ void RayGen()
     }
 
     // ---- temporal accumulation ---------------------------------------------
-    uint acc = frame.z;
-    float3 prev = (acc == 0u) ? float3(0, 0, 0) : gAccum[pix].rgb;
-    float3 sum = prev + radiance;
-    gAccum[pix] = float4(sum, 1.0f);
+    // Everything accumulates as a RUNNING MEAN, colour and guide buffers alike.
+    // Guides overwritten every frame stay as noisy as a handful of jittered
+    // samples forever, and both our denoiser and DLSS RR demodulate with the
+    // albedo and steer by the normal and depth - so that per-frame noise
+    // multiplies straight back into their output as detail that crawls. Means
+    // rather than sums so the buffers always hold directly usable values;
+    // DLSS reads them as-is and cannot divide by a sample count.
+    uint  acc = frame.z;
+    float t = 1.0f / float(acc + 1u);   // acc == 0 -> t = 1: plain overwrite
 
-    gGeo[pix] = float4(geoN, geoD);
+    // Colour and guides accumulate at different rates under DLSS. RR wants a
+    // NOISY current-frame colour - it runs its own temporal history over that -
+    // but its guide buffers have no history of their own, so those must still
+    // converge. Accumulating the colour as well double-filters it (ours plus
+    // RR's, so the image lags and wobbles when the camera moves) and, worse,
+    // makes the buffer a mean over many jitter positions while we report only
+    // this frame's offset - DLSS then shifts the image by that mismatch, which
+    // is the shake seen when jitter is enabled.
+    bool  dlssMode = (prevParams.w > 0.5f);
+    float tColor = dlssMode ? 1.0f : t;
+
+    float3 meanRad = lerp((acc == 0u || dlssMode) ? float3(0, 0, 0)
+                                                 : gAccum[pix].rgb,
+                          radiance, tColor);
+    gAccum[pix] = float4(meanRad, 1.0f);
+
+    float4 pGeo = (acc == 0u) ? float4(0, 0, 0, 0) : gGeo[pix];
+    gGeo[pix] = lerp(pGeo, float4(geoN, geoD), t);
+
     // Diffuse albedo only: metals have no diffuse lobe, and their colour is
     // already carried by the specular albedo. Handing the full base colour to
     // both would make DLSS demodulate metal twice.
-    gAlbedo[pix] = float4(geoAlb * (1.0f - geoMetal), 1.0f);
-    // Background reprojects a far point along the unjittered centre ray, so it
-    // carries no offset; surfaces use the jitter their primary ray was traced
-    // with.
+    float4 pAlb = (acc == 0u) ? float4(0, 0, 0, 0) : gAlbedo[pix];
+    gAlbedo[pix] = lerp(pAlb, float4(geoAlb * (1.0f - geoMetal), 1.0f), t);
+
+    float4 pNR = (acc == 0u) ? float4(0, 0, 0, 0) : gNormalRough[pix];
+    gNormalRough[pix] = lerp(pNR, float4(geoN, geoRough), t);
+
+    float4 pSA = (acc == 0u) ? float4(0, 0, 0, 0) : gSpecAlbedo[pix];
+    gSpecAlbedo[pix] = lerp(pSA, float4(geoSpec, 1.0f), t);
+
+    float thisDepth = (geoD > 0.0f) ? linearDepthOf(geoPos) : cameraPos.w;
+    float pLD = (acc == 0u) ? 0.0f : gLinearDepth[pix];
+    gLinearDepth[pix] = lerp(pLD, thisDepth, t);
+
+    // Motion stays per-frame: it describes THIS frame's camera step, and while
+    // accumulating the camera is not moving anyway.
     gMotion[pix] = (geoD > 0.0f)
         ? motionVector(geoPos, pix, dim, geoJit)
         : motionVector(origin0 + dir0 * 1e6f, pix, dim, float2(0.0f, 0.0f));
-    gNormalRough[pix] = float4(geoN, geoRough);
-    gSpecAlbedo[pix] = float4(geoSpec, 1.0f);
-    gLinearDepth[pix] = (geoD > 0.0f) ? linearDepthOf(geoPos) : cameraPos.w;
 
-    float3 avg = sum / float(acc + 1u);
-    gOutput[pix] = float4(tonemap(avg), 1.0f);
+    gOutput[pix] = float4(tonemap(meanRad), 1.0f);
 }
 
 //-----------------------------------------------------------------------------
