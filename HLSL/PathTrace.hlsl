@@ -172,31 +172,6 @@ float smithG1(float NdotX, float alpha)
            max(NdotX + sqrt(a2 + (1.0f - a2) * NdotX * NdotX), 1e-6f);
 }
 
-// Environment lookup for bounce rays, prefiltered by how blurry the path has
-// become. Reading the full-resolution map on every bounce makes glossy metal
-// extremely noisy: the specular lobe lands on a different bright texel each
-// sample, and that variance is exactly what breaks DLSS RR's reconstruction
-// (CAPCOM hit the same artefact on clothing speculars in RE ENGINE and
-// stabilised it by taking high-intensity IBL out of the per-sample estimator).
-// Sampling a mip that matches the lobe width integrates the environment
-// instead - slightly biased, dramatically calmer.
-float3 skyColorLod(float3 d, float rough)
-{
-    int envIdx = (int)envParams.x;
-    if (envIdx >= 0)
-    {
-        uint w, h, mips;
-        gTextures[envIdx].GetDimensions(0, w, h, mips);
-        float lod = sqrt(saturate(rough)) * (float)(mips - 1);
-        float u = atan2(d.z, d.x) * (0.5f / PI) + 0.5f;
-        float v = acos(clamp(d.y, -1.0f, 1.0f)) / PI;
-        return gTextures[envIdx].SampleLevel(gSampler, float2(u, v), lod).rgb * envParams.y;
-    }
-
-    float t = saturate(d.y * 0.5f + 0.5f);
-    return lerp(float3(0.03f, 0.04f, 0.06f), float3(0.25f, 0.38f, 0.55f), t);
-}
-
 float3 skyColor(float3 d)
 {
     // Equirectangular environment map when available.
@@ -431,11 +406,6 @@ void RayGen()
         float3 sampleRad = float3(0, 0, 0);
         float3 throughput = float3(1, 1, 1);
 
-        // How blurry the path has become: 0 while the ray is still the sharp
-        // primary ray, then widened by every lobe it scatters through. Drives
-        // the prefiltered environment lookup on miss.
-        float pathRough = 0.0f;
-
         [loop]
         for (uint b = 0; b < maxDepth; ++b)
         {
@@ -445,10 +415,7 @@ void RayGen()
 
             if (p.hitT < 0.0f)
             {
-                // Primary rays keep the sharp background; bounce rays read the
-                // environment prefiltered to the width of the path's lobe.
-                sampleRad += throughput * ((b == 0u) ? skyColor(sDir)
-                                                     : skyColorLod(sDir, pathRough));
+                sampleRad += throughput * skyColor(sDir);
                 break;
             }
 
@@ -506,17 +473,12 @@ void RayGen()
                             pow(saturate(1.0f - saturate(dot(V, H))), 5.0f);
                 throughput *= Fh * smithG1(NdotL, alpha) / pSpec;
 
-                // A glossy bounce widens the path by its own lobe.
-                pathRough = min(1.0f, pathRough + p.roughness);
             }
             else
             {
                 newDir = cosineSample(N, s);
                 throughput *= (p.albedo * (1.0f - p.metallic)) / (1.0f - pSpec);
 
-                // A diffuse bounce scatters over the whole hemisphere; any
-                // environment detail beyond its average is pure variance.
-                pathRough = 1.0f;
             }
 
             sOrigin = p.worldPos + N * 1e-3f;
@@ -567,50 +529,50 @@ void RayGen()
     }
 
     // ---- temporal accumulation ---------------------------------------------
-    // Everything accumulates as a RUNNING MEAN, colour and guide buffers alike.
-    // Guides overwritten every frame stay as noisy as a handful of jittered
-    // samples forever, and both our denoiser and DLSS RR demodulate with the
-    // albedo and steer by the normal and depth - so that per-frame noise
-    // multiplies straight back into their output as detail that crawls. Means
-    // rather than sums so the buffers always hold directly usable values;
-    // DLSS reads them as-is and cannot divide by a sample count.
+    // Buffers hold RUNNING MEANS rather than sums, so every consumer can read
+    // them as-is; DLSS in particular cannot divide by a sample count.
     uint  acc = frame.z;
     float t = 1.0f / float(acc + 1u);   // acc == 0 -> t = 1: plain overwrite
 
-    // Colour and guides accumulate at different rates under DLSS. RR wants a
-    // NOISY current-frame colour - it runs its own temporal history over that -
-    // but its guide buffers have no history of their own, so those must still
-    // converge. Accumulating the colour as well double-filters it (ours plus
-    // RR's, so the image lags and wobbles when the camera moves) and, worse,
-    // makes the buffer a mean over many jitter positions while we report only
-    // this frame's offset - DLSS then shifts the image by that mismatch, which
-    // is the shake seen when jitter is enabled.
+    // Under DLSS nothing accumulates here: colour and guides alike are this
+    // frame's values. RR runs its own temporal history over the colour, and it
+    // expects each guide to describe the SAME sub-pixel position as the colour
+    // and the jitter offset we report. A mean spans many jitter positions while
+    // we report only the latest, so the guides would disagree with the colour
+    // they steer - the same mismatch that shifted the image when the colour was
+    // still being accumulated. Averaging linear depth is the worst of it: across
+    // a silhouette it lands between the foreground and the background, handing
+    // RR a surface that is not there. Feeding it pre-averaged guides also throws
+    // away the sub-pixel detail DLSS exists to reconstruct.
+    //
+    // Our own denoiser is the opposite case: it has no network to lean on, so it
+    // keeps the means and converges them while the camera is still.
     bool  dlssMode = (prevParams.w > 0.5f);
-    float tColor = dlssMode ? 1.0f : t;
+    float tAcc  = dlssMode ? 1.0f : t;
+    bool  fresh = (acc == 0u) || dlssMode;   // no history to blend against
 
-    float3 meanRad = lerp((acc == 0u || dlssMode) ? float3(0, 0, 0)
-                                                 : gAccum[pix].rgb,
-                          radiance, tColor);
+    float3 meanRad = lerp(fresh ? float3(0, 0, 0) : gAccum[pix].rgb,
+                          radiance, tAcc);
     gAccum[pix] = float4(meanRad, 1.0f);
 
-    float4 pGeo = (acc == 0u) ? float4(0, 0, 0, 0) : gGeo[pix];
-    gGeo[pix] = lerp(pGeo, float4(geoN, geoD), t);
+    float4 pGeo = fresh ? float4(0, 0, 0, 0) : gGeo[pix];
+    gGeo[pix] = lerp(pGeo, float4(geoN, geoD), tAcc);
 
     // Diffuse albedo only: metals have no diffuse lobe, and their colour is
     // already carried by the specular albedo. Handing the full base colour to
     // both would make DLSS demodulate metal twice.
-    float4 pAlb = (acc == 0u) ? float4(0, 0, 0, 0) : gAlbedo[pix];
-    gAlbedo[pix] = lerp(pAlb, float4(geoAlb * (1.0f - geoMetal), 1.0f), t);
+    float4 pAlb = fresh ? float4(0, 0, 0, 0) : gAlbedo[pix];
+    gAlbedo[pix] = lerp(pAlb, float4(geoAlb * (1.0f - geoMetal), 1.0f), tAcc);
 
-    float4 pNR = (acc == 0u) ? float4(0, 0, 0, 0) : gNormalRough[pix];
-    gNormalRough[pix] = lerp(pNR, float4(geoN, geoRough), t);
+    float4 pNR = fresh ? float4(0, 0, 0, 0) : gNormalRough[pix];
+    gNormalRough[pix] = lerp(pNR, float4(geoN, geoRough), tAcc);
 
-    float4 pSA = (acc == 0u) ? float4(0, 0, 0, 0) : gSpecAlbedo[pix];
-    gSpecAlbedo[pix] = lerp(pSA, float4(geoSpec, 1.0f), t);
+    float4 pSA = fresh ? float4(0, 0, 0, 0) : gSpecAlbedo[pix];
+    gSpecAlbedo[pix] = lerp(pSA, float4(geoSpec, 1.0f), tAcc);
 
     float thisDepth = (geoD > 0.0f) ? linearDepthOf(geoPos) : cameraPos.w;
-    float pLD = (acc == 0u) ? 0.0f : gLinearDepth[pix];
-    gLinearDepth[pix] = lerp(pLD, thisDepth, t);
+    float pLD = fresh ? 0.0f : gLinearDepth[pix];
+    gLinearDepth[pix] = lerp(pLD, thisDepth, tAcc);
 
     // Motion stays per-frame: it describes THIS frame's camera step, and while
     // accumulating the camera is not moving anyway.

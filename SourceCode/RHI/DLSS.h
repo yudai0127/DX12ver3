@@ -103,12 +103,6 @@ public:
         DirectX::XMFLOAT2 jitter{};  // sub-pixel offset used this frame, in pixels
         bool  reset = false;         // true to discard DLSS's history
         Quality quality = Quality::Balanced;
-
-        // Flip the direction of the motion vectors as DLSS reads them. Ours
-        // point from the current pixel back to where the surface was; the
-        // opposite convention exists, and the jitter offset already turned out
-        // to need negating, so this stays selectable until motion is verified.
-        bool invertMotion = false;
     };
 
     // The render resolution DLSS expects for this preset and output size.

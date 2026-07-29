@@ -95,16 +95,6 @@ public:
     // 0 = Ultra Performance ... 4 = DLAA (native resolution).
     int dlssQuality = 2; // Balanced
 
-    // Render DLSS frames without a sub-pixel offset. Costs reconstruction
-    // quality (DLSS gets no new sub-pixel information each frame) and is kept
-    // only as a way to rule the jitter out when chasing temporal artefacts.
-    bool dlssJitter = true;
-
-    // Diagnostic: flip the motion vector direction reported to DLSS.
-    // Static frames cannot tell the two conventions apart (the vectors
-    // are zero), so this only shows itself while the camera moves.
-    bool dlssInvertMotion = false;
-
     // True when DLSS actually ran on the last frame (the UI reports this, so a
     // silent fallback to the built-in path is visible).
     bool WasDLSSActive() const { return m_dlssActive; }

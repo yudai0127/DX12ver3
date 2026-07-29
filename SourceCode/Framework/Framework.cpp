@@ -189,9 +189,6 @@ void Framework::Render(float elapsedTime)
                         ImGui::Text("DLSS: %s",
                                     m_raytracer.WasDLSSActive() ? "active" : "FAILED (fallback)");
                         ImGui::TextDisabled("Render Scale is ignored while DLSS is on");
-                        ImGui::Checkbox("DLSS Jitter", &m_raytracer.dlssJitter);
-                        ImGui::Checkbox("Invert Motion Vectors (diagnostic)",
-                                        &m_raytracer.dlssInvertMotion);
                     }
                 }
             }

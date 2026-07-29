@@ -333,13 +333,8 @@ bool DLSS::EvaluateRR(ID3D12GraphicsCommandList* cmdList, const RRFrame& f)
     c.clipToPrevClip = ToSL(f.clipToPrevClip);
     c.prevClipToClip = ToSL(f.prevClipToClip);
     c.jitterOffset = { f.jitter.x, f.jitter.y };     // pixel space
-    // Our motion vectors are in pixels, so scale them into clip space. The
-    // scale doubles as the direction control - negating it flips how DLSS
-    // reads every vector.
-    {
-        const float sgn = f.invertMotion ? -1.0f : 1.0f;
-        c.mvecScale = { sgn / (float)f.renderWidth, sgn / (float)f.renderHeight };
-    }
+    // Our motion vectors are in pixels, so scale them into clip space.
+    c.mvecScale = { 1.0f / (float)f.renderWidth, 1.0f / (float)f.renderHeight };
     c.cameraPos = { f.cameraPos.x, f.cameraPos.y, f.cameraPos.z };
     c.cameraUp = { f.cameraUp.x, f.cameraUp.y, f.cameraUp.z };
     c.cameraRight = { f.cameraRight.x, f.cameraRight.y, f.cameraRight.z };

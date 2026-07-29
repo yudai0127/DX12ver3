@@ -1080,7 +1080,7 @@ void RaytracingRenderer::Render(const Camera& camera)
     // (a Halton 2,3 sequence) which DLSS is told about, so it can resolve edges
     // across frames. Without DLSS each sample keeps its own random jitter.
     XMFLOAT2 jitter(0.0f, 0.0f);
-    if (wantDLSS && dlssJitter)
+    if (wantDLSS)
     {
         auto halton = [](uint32_t i, uint32_t base) {
             float f = 1.0f, r = 0.0f;
@@ -1109,13 +1109,12 @@ void RaytracingRenderer::Render(const Camera& camera)
         m_hasPrevKey = true;
     }
 
-    // Accumulation now runs under DLSS too. RR has its own temporal history,
-    // but its GUIDE buffers (albedo, normal+roughness, depth) have none: fed
-    // fresh single-frame values they stay jitter-noisy forever, and RR
-    // remodulates its stabilised lighting with that noisy albedo every frame -
-    // the crawling that persisted even with a still camera. With the buffers
-    // holding running means, a still camera converges the guides and the
-    // colour input alike; any movement resets via ResetKey as usual.
+    // Accumulation is for our own denoiser only. Under DLSS the shader writes
+    // this frame's colour and guides straight out: RR carries the temporal side
+    // itself and needs every guide to match the colour and the jitter offset we
+    // report for this frame. Pre-averaging them was a workaround for crawl that
+    // turned out to come from the motion vectors, so it no longer buys anything
+    // and costs RR the sub-pixel detail it is there to reconstruct.
 
     // frame: x = RNG seed, y = path depth, z = prior sample count, w = mode.
     sc.frame = XMUINT4(m_frameCounter++, (uint32_t)depth, m_accumIndex,
@@ -1288,14 +1287,13 @@ void RaytracingRenderer::Render(const Camera& camera)
         f.farZ = camera.farZ;
         f.fovY = XMConvertToRadians(camera.fovDegree);
         f.aspect = aspect;
-        // DLSS's jitter offset runs opposite to the offset we apply to the ray:
-        // established by testing all four sign combinations, only the fully
-        // negated one holds a static image still. The ray tracer keeps
+        // We offset the SAMPLE POSITION by +jitter; Streamline wants the offset
+        // applied to the PROJECTION MATRIX, which shifts the image the other
+        // way for the same sample. Hence the negation - the ray tracer keeps
         // rendering with `jitter` itself.
         f.jitter = XMFLOAT2(-jitter.x, -jitter.y);
         f.reset = !m_hasPrevVP;
         f.quality = quality;
-        f.invertMotion = dlssInvertMotion;
 
         m_dlssActive = DLSS::Instance().EvaluateRR(cmd4, f);
 
