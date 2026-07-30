@@ -7,9 +7,11 @@
 //   Payload : float3 color + float  hitT   = 16 bytes
 //   Attrib  : float2 barycentrics          = 8 bytes (built-in triangle attr)
 //-----------------------------------------------------------------------------
-// Payload = albedo(12) + normal(12) + worldPos(12) + emissive(12)
-// + metallic(4) + roughness(4) + hitT(4) = 60 bytes.
-static constexpr UINT kPayloadSize = 15 * sizeof(float); // 60
+// Payload = albedo(12) + normal(12) + emissive(12)
+// + metallic(4) + roughness(4) + hitT(4) = 48 bytes.
+// The hit position is not carried: it is origin + direction * hitT, which
+// RayGen can rebuild from the ray it already has.
+static constexpr UINT kPayloadSize = 12 * sizeof(float); // 48
 static constexpr UINT kAttribSize  = 2 * sizeof(float);  // 8
 // The path tracer is iterative: every TraceRay (primary + shadow) is issued
 // from RayGen, so nesting never exceeds 1. Keep a small margin.

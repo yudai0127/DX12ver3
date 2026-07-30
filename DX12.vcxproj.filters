@@ -98,6 +98,7 @@
     <None Include="HLSL\PathTrace.hlsl" />
     <None Include="HLSL\Denoise_CS.hlsl" />
     <None Include="HLSL\Upscale_CS.hlsl" />
+    <None Include="HLSL\TAA_CS.hlsl" />
   </ItemGroup>
   <ItemGroup>
     <FxCompile Include="HLSL\Sprite_PS.hlsl" />

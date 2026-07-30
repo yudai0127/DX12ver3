@@ -95,6 +95,12 @@ public:
     // 0 = Ultra Performance ... 4 = DLAA (native resolution).
     int dlssQuality = 2; // Balanced
 
+    // Temporal antialiasing for raytracing mode. That mode renders with no
+    // antialiasing at all, which shows up as sparkling specular highlights,
+    // and DLSS costs far more than the mode takes to render. Ignored while
+    // DLSS is on (it does this itself) and in path tracing (the denoiser does).
+    bool taa = true;
+
     // True when DLSS actually ran on the last frame (the UI reports this, so a
     // silent fallback to the built-in path is visible).
     bool WasDLSSActive() const { return m_dlssActive; }
@@ -241,6 +247,9 @@ private:
     // history SRV(t3), output UAV(u0), history UAV(u1).
     ComPtr<ID3D12RootSignature> m_denoiseRootSig;
     ComPtr<ID3D12PipelineState> m_denoisePSO;
+    // Raytracing mode's temporal resolve. Same bindings and constants as the
+    // denoiser, so it shares the root signature and descriptor tables above.
+    ComPtr<ID3D12PipelineState> m_taaPSO;
     ConstantBuffer              m_denoiseCB;
     D3D12_GPU_DESCRIPTOR_HANDLE m_denoiseTableGpu[2] = {};   // table base per phase
     D3D12_CPU_DESCRIPTOR_HANDLE m_denoiseCpu[2][9] = {};     // views to (re)create
@@ -253,6 +262,9 @@ private:
     int                         m_histPhase = 0;             // 0/1, toggled per frame
     DirectX::XMFLOAT4X4         m_prevViewProj = {};
     bool                        m_hasPrevVP = false;
+    // Raytracing and path tracing produce very different images, so DLSS's
+    // history has to be dropped when the mode changes or it ghosts across.
+    int                         m_prevRenderMode = -1;
     bool                        m_dlssActive = false; // DLSS ran last frame
 
     // Upscale pass: render-resolution image -> output-resolution image.

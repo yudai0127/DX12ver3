@@ -83,11 +83,14 @@ cbuffer HitCB : register(b1)
 
 //---- payloads ---------------------------------------------------------------
 // Surface data filled by ClosestHit and consumed by RayGen.
+// Kept as small as it can be: the payload travels with every ray and its size
+// drives register pressure across the whole state object. The hit position is
+// deliberately absent - it is exactly origin + direction * hitT, so the caller
+// that already holds the ray can rebuild it for free.
 struct Payload
 {
     float3 albedo;
     float3 normal;
-    float3 worldPos;
     float3 emissive;
     float  metallic;
     float  roughness;
@@ -278,8 +281,12 @@ void RayGen()
     uint  mode = frame.w;            // 0 = raytracing (realtime), 1 = path tracing
     uint  maxDepth = max(frame.y, 1u);
 
-    // Sub-pixel jitter for AA (path tracing only; raytracing stays noise-free).
-    float2 jitter = (mode == 1u) ? (float2(rnd(s), rnd(s)) - 0.5f) : float2(0.0f, 0.0f);
+    // Sub-pixel jitter for the primary ray. Path tracing picks its own offset
+    // per sample further down, so this one only serves raytracing mode. That
+    // mode is deterministic and has no antialiasing of its own, so it renders
+    // at whatever offset the temporal resolve was told about - DLSS's, or our
+    // own TAA's. C++ leaves this at zero when neither is running.
+    float2 jitter = (mode == 0u) ? prevParams.yz : float2(0.0f, 0.0f);
     float3 origin = cameraPos.xyz;
     float3 dir = cameraRay(float2(pix) + 0.5f + jitter, dim);
 
@@ -313,17 +320,18 @@ void RayGen()
             if (p.hitT < 0.0f) { radiance += tp * skyColor(dir); break; }
 
             radiance += tp * p.emissive; // glowing surfaces
+            float3 hitPos = origin + dir * p.hitT;
             float3 N = p.normal, V = -dir;
             if (b == 0u)                                   // primary-hit G-buffer
             {
-                geoN = N; geoD = p.hitT; geoAlb = p.albedo; geoPos = p.worldPos;
+                geoN = N; geoD = p.hitT; geoAlb = p.albedo; geoPos = hitPos;
                 geoRough = p.roughness;
                 geoSpec = lerp(float3(0.04f, 0.04f, 0.04f), p.albedo, p.metallic);
                 geoMetal = p.metallic;
             }
             float3 L = normalize(-lightDir.xyz);
             float ndotl = saturate(dot(N, L));
-            float vis = (ndotl > 0.0f) ? traceShadow(p.worldPos + N * 1e-2f, L) : 0.0f;
+            float vis = (ndotl > 0.0f) ? traceShadow(hitPos + N * 1e-2f, L) : 0.0f;
             radiance += tp * PBR_DirectLight(N, V, L, p.albedo, p.metallic, p.roughness, lightColor.rgb) * vis;
             radiance += tp * p.albedo * ambient.rgb * (1.0f - p.metallic); // ambient fill
 
@@ -335,7 +343,7 @@ void RayGen()
             tp *= F * (1.0f - p.roughness);
             if (max(tp.r, max(tp.g, tp.b)) < 0.02f) break;
 
-            origin = p.worldPos + N * 1e-3f;
+            origin = hitPos + N * 1e-3f;
             dir = reflect(dir, N);
         }
         gGeo[pix] = float4(geoN, geoD);
@@ -344,16 +352,21 @@ void RayGen()
         // colour to both would make DLSS demodulate metal twice.
         gAlbedo[pix] = float4(geoAlb * (1.0f - geoMetal), 1.0f);
         // Background pixels still move when the camera turns: reproject a point
-        // far along the primary ray instead of a surface hit.
-        // Raytracing mode never jitters, so the offset is zero here.
+        // far along the primary ray instead of a surface hit. geoPos came from
+        // the jittered ray, so it reprojects to the jittered position; the
+        // background point comes from the centre ray and does not.
         gMotion[pix] = (geoD > 0.0f)
-            ? motionVector(geoPos, pix, dim, float2(0.0f, 0.0f))
+            ? motionVector(geoPos, pix, dim, jitter)
             : motionVector(origin0 + dir0 * 1e6f, pix, dim, float2(0.0f, 0.0f));
         gNormalRough[pix] = float4(geoN, geoRough);
         gSpecAlbedo[pix] = float4(geoSpec, 1.0f);
         // View-space Z, and the far plane for sky so DLSS never sees a
         // depth beyond the frustum it was told about.
         gLinearDepth[pix] = (geoD > 0.0f) ? linearDepthOf(geoPos) : cameraPos.w;
+        // Ray Reconstruction only accepts linear HDR, and it reads gAccum. This
+        // mode does not accumulate, so the frame's radiance goes there as-is;
+        // gOutput stays the tonemapped image the non-DLSS path presents.
+        gAccum[pix] = float4(radiance, 1.0f);
         gOutput[pix] = float4(tonemap(radiance), 1.0f);
         return;
     }
@@ -421,6 +434,7 @@ void RayGen()
 
             sampleRad += throughput * p.emissive; // glowing surfaces contribute + drive GI
 
+            float3 hitPos = sOrigin + sDir * p.hitT;
             float3 N = p.normal;
             float3 V = -sDir;
             if (b == 0u)                     // primary hit: feed the guide buffers
@@ -428,7 +442,7 @@ void RayGen()
                 gnSum += N;
                 gdSum += p.hitT;
                 galbSum += p.albedo;
-                gposSum += p.worldPos;
+                gposSum += hitPos;
                 groughSum += p.roughness;
                 gspecSum += lerp(float3(0.04f, 0.04f, 0.04f), p.albedo, p.metallic);
                 gmetalSum += p.metallic;
@@ -442,7 +456,7 @@ void RayGen()
             float  ndotl = saturate(dot(N, Ls));
             if (ndotl > 0.0f)
             {
-                float vis = traceShadow(p.worldPos + N * 1e-2f, Ls);
+                float vis = traceShadow(hitPos + N * 1e-2f, Ls);
                 sampleRad += throughput *
                     PBR_DirectLight(N, V, Ls, p.albedo, p.metallic, p.roughness, lightColor.rgb) * vis;
             }
@@ -481,7 +495,7 @@ void RayGen()
 
             }
 
-            sOrigin = p.worldPos + N * 1e-3f;
+            sOrigin = hitPos + N * 1e-3f;
             sDir = newDir;
 
             if (b >= 3u)
@@ -656,7 +670,6 @@ void ClosestHit(inout Payload payload,
 
     payload.albedo = base.rgb;
     payload.normal = N;
-    payload.worldPos = WorldRayOrigin() + RayTCurrent() * WorldRayDirection();
     payload.emissive = emissive;
     payload.metallic = metallic;
     payload.roughness = clamp(roughness, 0.04f, 1.0f);

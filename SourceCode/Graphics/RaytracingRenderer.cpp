@@ -193,6 +193,22 @@ bool RaytracingRenderer::BuildDenoisePipeline()
         OutputDebugStringW(L"[RT] denoise PSO create failed\n");
         return false;
     }
+
+    // Raytracing mode's temporal resolve shares everything but the shader.
+    // Failing to build it is not fatal: that mode just renders aliased.
+    std::vector<char> taaCs = ShaderManager::Instance()->CompileFromFile(
+        L"HLSL/TAA_CS.hlsl", L"main", L"cs_6_0");
+    if (taaCs.empty())
+    {
+        OutputDebugStringW(L"[RT] TAA_CS.hlsl compile failed\n");
+    }
+    else
+    {
+        pd.CS.pShaderBytecode = taaCs.data();
+        pd.CS.BytecodeLength = taaCs.size();
+        if (FAILED(device->CreateComputePipelineState(&pd, IID_PPV_ARGS(&m_taaPSO))))
+            OutputDebugStringW(L"[RT] TAA PSO create failed\n");
+    }
     return true;
 }
 
@@ -1010,8 +1026,19 @@ void RaytracingRenderer::Render(const Camera& camera)
     // DLSS Ray Reconstruction replaces both our denoiser and the upscale, and
     // does its own temporal accumulation - so ours is switched off while it
     // runs and the ray tracer emits a single noisy sample per pixel instead.
-    const bool wantDLSS = useDLSS && (renderMode == 1) &&
+    //
+    // Raytracing mode benefits just as much: it has no jitter and no
+    // accumulation of its own, so it renders with hard aliased edges, and DLSS
+    // supplies both the antialiasing and the resolution drop. Its output is
+    // clean rather than noisy, which is not what RR is tuned for, but it writes
+    // the same guide buffers and linear HDR colour that RR needs.
+    const bool wantDLSS = useDLSS &&
                           DLSS::Instance().SupportsRayReconstruction();
+
+    // Our own temporal resolve for raytracing mode, for when DLSS is off. DLSS
+    // costs a fixed few milliseconds set by the output resolution, which is a
+    // poor trade against a mode that renders in about three.
+    const bool wantTAA = (renderMode == 0) && taa && m_taaPSO && !wantDLSS;
 
     // DLSS reconstructs from a fixed resolution per preset, so let it choose
     // rather than the renderScale slider.
@@ -1080,7 +1107,7 @@ void RaytracingRenderer::Render(const Camera& camera)
     // (a Halton 2,3 sequence) which DLSS is told about, so it can resolve edges
     // across frames. Without DLSS each sample keeps its own random jitter.
     XMFLOAT2 jitter(0.0f, 0.0f);
-    if (wantDLSS)
+    if (wantDLSS || wantTAA)
     {
         auto halton = [](uint32_t i, uint32_t base) {
             float f = 1.0f, r = 0.0f;
@@ -1146,10 +1173,12 @@ void RaytracingRenderer::Render(const Camera& camera)
     desc.Depth = 1;
     cmd4->DispatchRays(&desc);
 
-    // ---- optional spatial denoise (path-tracing mode only) -----------
+    // ---- temporal resolve: the path tracer's denoiser, or raytracing's TAA --
+    // Both read and write the same buffers with the same constants, so they
+    // differ only in which pipeline state runs.
     const bool doDenoise = (renderMode == 1) && denoise && m_denoisePSO &&
                            denoiseRadius > 0 && !wantDLSS;
-    if (doDenoise)
+    if (doDenoise || wantTAA)
     {
         const int phase = m_histPhase;   // reads m_hist*[phase], writes m_hist*[1-phase]
         ID3D12Resource* colRead = m_histColor[phase].Get();
@@ -1167,7 +1196,9 @@ void RaytracingRenderer::Render(const Camera& camera)
         dc.camUp = sc.camUp;
         dc.camFwd = sc.camFwd;
         dc.cameraPos = sc.cameraPos;
-        dc.temporalValid = m_hasPrevVP ? 1 : 0;
+        // The two passes share the history buffers, so a mode switch would
+        // reproject one mode's image into the other's.
+        dc.temporalValid = (m_hasPrevVP && renderMode == m_prevRenderMode) ? 1 : 0;
         m_denoiseCB.Update(dc);
 
         // Order RayGen's output write before the denoiser overwrites it, and
@@ -1197,7 +1228,7 @@ void RaytracingRenderer::Render(const Camera& camera)
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
         cmd4->SetComputeRootSignature(m_denoiseRootSig.Get());
-        cmd4->SetPipelineState(m_denoisePSO.Get());
+        cmd4->SetPipelineState(wantTAA ? m_taaPSO.Get() : m_denoisePSO.Get());
         cmd4->SetComputeRootDescriptorTable(0, m_denoiseTableGpu[phase]);
         cmd4->SetComputeRootConstantBufferView(1, m_denoiseCB.GetGpuAddress());
         cmd4->Dispatch((m_renderWidth + 7) / 8, (m_renderHeight + 7) / 8, 1);
@@ -1292,7 +1323,7 @@ void RaytracingRenderer::Render(const Camera& camera)
         // way for the same sample. Hence the negation - the ray tracer keeps
         // rendering with `jitter` itself.
         f.jitter = XMFLOAT2(-jitter.x, -jitter.y);
-        f.reset = !m_hasPrevVP;
+        f.reset = !m_hasPrevVP || (renderMode != m_prevRenderMode);
         f.quality = quality;
 
         m_dlssActive = DLSS::Instance().EvaluateRR(cmd4, f);
@@ -1356,6 +1387,7 @@ void RaytracingRenderer::Render(const Camera& camera)
     // happen every frame, not just when the denoiser runs.
     m_prevViewProj = curViewProj;
     m_hasPrevVP = true;
+    m_prevRenderMode = renderMode;
 
     // One more sample has been accumulated this frame.
     ++m_accumIndex;

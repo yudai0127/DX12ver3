@@ -178,18 +178,26 @@ void Framework::Render(float elapsedTime)
                 ImGui::Checkbox("Denoise", &m_raytracer.denoise);
                 ImGui::SliderInt("Denoise Radius", &m_raytracer.denoiseRadius, 0, 4);
                 ImGui::SliderInt("Samples / Frame", &m_raytracer.samplesPerFrame, 1, 8);
-                if (DLSS::Instance().SupportsRayReconstruction())
+            }
+            else
+            {
+                // Raytracing mode has no antialiasing without this.
+                ImGui::Checkbox("TAA", &m_raytracer.taa);
+            }
+            // Both ray traced modes can use DLSS: path tracing wants the
+            // denoising, raytracing wants the antialiasing it otherwise has
+            // no source of.
+            if (DLSS::Instance().SupportsRayReconstruction())
+            {
+                ImGui::Checkbox("DLSS Ray Reconstruction", &m_raytracer.useDLSS);
+                if (m_raytracer.useDLSS)
                 {
-                    ImGui::Checkbox("DLSS Ray Reconstruction", &m_raytracer.useDLSS);
-                    if (m_raytracer.useDLSS)
-                    {
-                        const char* q[] = { "Ultra Performance", "Performance",
-                                            "Balanced", "Quality", "DLAA (native)" };
-                        ImGui::Combo("DLSS Quality", &m_raytracer.dlssQuality, q, 5);
-                        ImGui::Text("DLSS: %s",
-                                    m_raytracer.WasDLSSActive() ? "active" : "FAILED (fallback)");
-                        ImGui::TextDisabled("Render Scale is ignored while DLSS is on");
-                    }
+                    const char* q[] = { "Ultra Performance", "Performance",
+                                        "Balanced", "Quality", "DLAA (native)" };
+                    ImGui::Combo("DLSS Quality", &m_raytracer.dlssQuality, q, 5);
+                    ImGui::Text("DLSS: %s",
+                                m_raytracer.WasDLSSActive() ? "active" : "FAILED (fallback)");
+                    ImGui::TextDisabled("Render Scale is ignored while DLSS is on");
                 }
             }
             ImGui::SliderFloat("RT Exposure", &m_raytracer.exposure, 0.05f, 2.0f);

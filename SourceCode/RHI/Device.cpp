@@ -194,6 +194,11 @@ bool Device::CreateDevice()
 //-----------------------------------------------------------------------------
 // EnableDebugLayer  ―  DEBUG ビルド時のみ有効化
 //-----------------------------------------------------------------------------
+// GPU ベースバリデーションは全シェーダーに検証コードを埋め込むため、GPU 時間が
+// 何倍にもなる。特定のバグを追うときだけ 1 にすること。これを有効にしたまま
+// 計測した数字は、実際の性能とは別物になる。
+#define DX12_ENABLE_GPU_BASED_VALIDATION 0
+
 void Device::EnableDebugLayer()
 {
 #ifdef _DEBUG
@@ -203,12 +208,14 @@ void Device::EnableDebugLayer()
         debugController->EnableDebugLayer();
         OutputDebugStringW(L"[DX12] デバッグレイヤー 有効化\n");
 
-        // GPU ベースバリデーション（重いが詳細なエラーが出る）
+#if DX12_ENABLE_GPU_BASED_VALIDATION
         ComPtr<ID3D12Debug3> debug3;
         if (SUCCEEDED(debugController.As(&debug3)))
         {
             debug3->SetEnableGPUBasedValidation(TRUE);
+            OutputDebugStringW(L"[DX12] GPU ベースバリデーション 有効化（非常に重い）\n");
         }
+#endif
     }
 #endif
 }
