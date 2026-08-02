@@ -38,7 +38,7 @@ namespace
 
         DirectX::XMFLOAT4   camRight;      // xyz = right, w = tanHalfFov * aspect
         DirectX::XMFLOAT4   camUp;         // xyz = up,    w = tanHalfFov
-        DirectX::XMFLOAT4   camFwd;        // xyz = forward
+        DirectX::XMFLOAT4   camFwd;        // xyz = forward, w = camera near plane
         DirectX::XMFLOAT4   cameraPos;
 
         int32_t          temporalValid;    // 1 = history usable this frame
@@ -1028,17 +1028,15 @@ void RaytracingRenderer::Render(const Camera& camera)
     if (m_renderWidth == 0) m_renderWidth = 1;
     if (m_renderHeight == 0) m_renderHeight = 1;
 
-    // DLSS Ray Reconstruction replaces both our denoiser and the upscale, and
-    // does its own temporal accumulation - so ours is switched off while it
-    // runs and the ray tracer emits a single noisy sample per pixel instead.
-    //
-    // Raytracing mode benefits just as much: it has no jitter and no
-    // accumulation of its own, so it renders with hard aliased edges, and DLSS
-    // supplies both the antialiasing and the resolution drop. Its output is
-    // clean rather than noisy, which is not what RR is tuned for, but it writes
-    // the same guide buffers and linear HDR colour that RR needs.
-    const bool wantDLSS = useDLSS &&
-                          DLSS::Instance().SupportsRayReconstruction();
+    // Match the feature to the renderer. Deterministic raytracing needs only
+    // antialiasing/upscaling, so it uses ordinary DLSS Super Resolution. Path
+    // tracing feeds one noisy sample to Ray Reconstruction, which replaces the
+    // built-in denoiser as well as the upscale.
+    const bool wantSR = (renderMode == 0) && useDLSS &&
+                        DLSS::Instance().SupportsUpscaling();
+    const bool wantRR = (renderMode == 1) && useDLSS &&
+                        DLSS::Instance().SupportsRayReconstruction();
+    const bool wantDLSS = wantSR || wantRR;
 
     // Our own temporal resolve for raytracing mode, for when DLSS is off. DLSS
     // costs a fixed few milliseconds set by the output resolution, which is a
@@ -1049,13 +1047,19 @@ void RaytracingRenderer::Render(const Camera& camera)
     // rather than the renderScale slider.
     const int qi = (dlssQuality < 0) ? 0 : (dlssQuality > 4 ? 4 : dlssQuality);
     const DLSS::Quality quality = (DLSS::Quality)qi;
+    const DLSS::Feature dlssFeature = wantRR
+        ? DLSS::Feature::RayReconstruction
+        : DLSS::Feature::SuperResolution;
     if (wantDLSS)
     {
-        if (m_dlssSizeQuality != qi ||
+        const int featureKey = (int)dlssFeature;
+        if (m_dlssSizeFeature != featureKey || m_dlssSizeQuality != qi ||
             m_dlssSizeOutW != m_width || m_dlssSizeOutH != m_height)
         {
             m_dlssSizeValid = DLSS::Instance().GetRenderSize(
-                quality, m_width, m_height, m_dlssRenderW, m_dlssRenderH);
+                dlssFeature, quality, m_width, m_height,
+                m_dlssRenderW, m_dlssRenderH);
+            m_dlssSizeFeature = featureKey;
             m_dlssSizeQuality = qi;
             m_dlssSizeOutW = m_width;
             m_dlssSizeOutH = m_height;
@@ -1094,7 +1098,11 @@ void RaytracingRenderer::Render(const Camera& camera)
                              camera.lightColor.z * li, camera.lightColor.w);
     sc.ambient = camera.ambient;
     sc.ambient.w = exposure; // pass exposure to the tonemapper (ambient.rgb unused)
-    const int spp = (samplesPerFrame < 1) ? 1 : (samplesPerFrame > 8 ? 8 : samplesPerFrame);
+    const int requestedSpp = (samplesPerFrame < 1) ? 1
+                           : (samplesPerFrame > 8 ? 8 : samplesPerFrame);
+    // RR is trained to reconstruct a fresh noisy input. Tracing extra samples
+    // here pays their full path cost and then still pays RR's fixed cost.
+    const int spp = wantRR ? 1 : requestedSpp;
     sc.envParams = XMFLOAT4((float)m_envTexIndex, envIntensity, (float)spp, 0.0f);
     sc.prevViewProj = m_prevViewProj;
 
@@ -1113,7 +1121,7 @@ void RaytracingRenderer::Render(const Camera& camera)
         const float tanHalf = tanf(XMConvertToRadians(camera.fovDegree) * 0.5f);
         sc.camRight = XMFLOAT4(r3.x, r3.y, r3.z, tanHalf * aspect);
         sc.camUp    = XMFLOAT4(u3.x, u3.y, u3.z, tanHalf);
-        sc.camFwd   = XMFLOAT4(f3.x, f3.y, f3.z, 0.0f);
+        sc.camFwd   = XMFLOAT4(f3.x, f3.y, f3.z, camera.nearZ);
     }
 
     // Under DLSS the whole frame is rendered with one known sub-pixel offset
@@ -1289,15 +1297,15 @@ void RaytracingRenderer::Render(const Camera& camera)
             cmd4->ResourceBarrier(1, &b);
         }
 
-        DLSS::RRFrame f;
-        // With accumulation forced off, m_accum holds this frame's raw linear
-        // HDR radiance - exactly what Ray Reconstruction wants.
-        f.colorIn = m_accum.Get();           // noisy linear HDR, render res
-        f.colorOut = m_dlssColor.Get();      // denoised + upscaled, still HDR
+        DLSS::Frame f;
+        // With accumulation forced off, m_accum holds this frame's linear HDR
+        // radiance. It is deterministic in RT and one noisy sample in PT.
+        f.colorIn = m_accum.Get();           // linear HDR, render res
+        f.colorOut = m_dlssColor.Get();      // reconstructed HDR, output res
         f.diffuseAlbedo = m_albedo.Get();
         f.specularAlbedo = m_specAlbedo.Get();
         f.normalRoughness = m_normalRough.Get();
-        f.linearDepth = m_linearDepth.Get();
+        f.depth = m_linearDepth.Get();
         f.motionVectors = m_motion.Get();
         f.renderWidth = m_renderWidth;
         f.renderHeight = m_renderHeight;
@@ -1344,7 +1352,9 @@ void RaytracingRenderer::Render(const Camera& camera)
         f.quality = quality;
 
         if (gtimer) gtimer->BeginScope(cmd4, GpuTimer::ScopeDLSS);
-        m_dlssActive = DLSS::Instance().EvaluateRR(cmd4, f);
+        m_dlssActive = wantRR
+            ? DLSS::Instance().EvaluateRR(cmd4, f)
+            : DLSS::Instance().EvaluateSR(cmd4, f);
         if (gtimer) gtimer->EndScope(cmd4, GpuTimer::ScopeDLSS);
 
         // Streamline binds its own descriptor heaps and does not restore ours,

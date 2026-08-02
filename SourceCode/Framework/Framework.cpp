@@ -184,19 +184,27 @@ void Framework::Render(float elapsedTime)
                 ImGui::Text("Accumulated: %u spp", m_raytracer.GetAccumulatedSamples());
                 ImGui::Checkbox("Denoise", &m_raytracer.denoise);
                 ImGui::SliderInt("Denoise Radius", &m_raytracer.denoiseRadius, 0, 4);
-                ImGui::SliderInt("Samples / Frame", &m_raytracer.samplesPerFrame, 1, 8);
+                if (m_raytracer.useDLSS)
+                    ImGui::TextDisabled("Ray Reconstruction uses 1 sample / frame");
+                else
+                    ImGui::SliderInt("Samples / Frame", &m_raytracer.samplesPerFrame, 1, 8);
             }
             else
             {
                 // Raytracing mode has no antialiasing without this.
                 ImGui::Checkbox("TAA", &m_raytracer.taa);
             }
-            // Both ray traced modes can use DLSS: path tracing wants the
-            // denoising, raytracing wants the antialiasing it otherwise has
-            // no source of.
-            if (DLSS::Instance().SupportsRayReconstruction())
+            // Use the cheaper Super Resolution feature for deterministic RT;
+            // reserve the denoising Ray Reconstruction feature for noisy PT.
+            const bool dlssAvailable = (m_renderMode == 2)
+                ? DLSS::Instance().SupportsRayReconstruction()
+                : DLSS::Instance().SupportsUpscaling();
+            if (dlssAvailable)
             {
-                ImGui::Checkbox("DLSS Ray Reconstruction", &m_raytracer.useDLSS);
+                const char* dlssLabel = (m_renderMode == 2)
+                    ? "DLSS Ray Reconstruction"
+                    : "DLSS Super Resolution";
+                ImGui::Checkbox(dlssLabel, &m_raytracer.useDLSS);
                 if (m_raytracer.useDLSS)
                 {
                     const char* q[] = { "Ultra Performance", "Performance",
@@ -415,7 +423,7 @@ void Framework::BeginFrame(const float clearColor[4])
             m_gpuTimer.GetScopeMs(GpuTimer::ScopeTrace));
         m_frameTimer.SetGpuScopeMs(1, "Denoise/TAA",
             m_gpuTimer.GetScopeMs(GpuTimer::ScopeResolve));
-        m_frameTimer.SetGpuScopeMs(2, "DLSS RR",
+        m_frameTimer.SetGpuScopeMs(2, "DLSS",
             m_gpuTimer.GetScopeMs(GpuTimer::ScopeDLSS));
         m_frameTimer.SetGpuScopeMs(3, "Post",
             m_gpuTimer.GetScopeMs(GpuTimer::ScopePost));

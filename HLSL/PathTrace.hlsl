@@ -55,7 +55,7 @@ cbuffer SceneCB : register(b0)
     // rasteriser never shows it because it only ever uses forward transforms.
     float4 camRight;  // xyz = right, w = tan(fovY/2) * aspect
     float4 camUp;     // xyz = up,    w = tan(fovY/2)
-    float4 camFwd;    // xyz = forward
+    float4 camFwd;    // xyz = forward, w = camera near plane
     // x = 1 when prevViewProj is valid; yz = fixed sub-pixel jitter in pixels;
     // w = 1 when that fixed jitter must be used (DLSS supplies its own sequence
     // and needs to know exactly which offset we rendered with).
@@ -258,6 +258,17 @@ float linearDepthOf(float3 worldPos)
     return dot(worldPos - cameraPos.xyz, cameraForward());
 }
 
+// D3D perspective depth in [0,1]. Ordinary DLSS Super Resolution expects the
+// same hardware-depth convention a raster depth buffer would contain, while
+// Ray Reconstruction uses the linear depth above.
+float hardwareDepthOf(float3 worldPos)
+{
+    const float z = max(linearDepthOf(worldPos), camFwd.w);
+    const float n = camFwd.w;
+    const float f = cameraPos.w;
+    return saturate(f / (f - n) - (n * f) / ((f - n) * z));
+}
+
 //---- shadow ray -------------------------------------------------------------
 float traceShadow(float3 origin, float3 L)
 {
@@ -360,12 +371,12 @@ void RayGen()
             : motionVector(origin0 + dir0 * 1e6f, pix, dim, float2(0.0f, 0.0f));
         gNormalRough[pix] = float4(geoN, geoRough);
         gSpecAlbedo[pix] = float4(geoSpec, 1.0f);
-        // View-space Z, and the far plane for sky so DLSS never sees a
-        // depth beyond the frustum it was told about.
-        gLinearDepth[pix] = (geoD > 0.0f) ? linearDepthOf(geoPos) : cameraPos.w;
-        // Ray Reconstruction only accepts linear HDR, and it reads gAccum. This
-        // mode does not accumulate, so the frame's radiance goes there as-is;
-        // gOutput stays the tonemapped image the non-DLSS path presents.
+        // Raytracing uses ordinary DLSS Super Resolution, whose depth tag is
+        // the D3D hardware-depth convention (near=0, far=1).
+        gLinearDepth[pix] = (geoD > 0.0f) ? hardwareDepthOf(geoPos) : 1.0f;
+        // DLSS reads linear HDR from gAccum. This mode does not accumulate, so
+        // the frame's radiance goes there as-is; gOutput remains the tonemapped
+        // image presented by the non-DLSS path.
         gAccum[pix] = float4(radiance, 1.0f);
         gOutput[pix] = float4(tonemap(radiance), 1.0f);
         return;

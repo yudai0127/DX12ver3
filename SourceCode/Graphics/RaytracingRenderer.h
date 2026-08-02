@@ -85,8 +85,9 @@ public:
     // knob DLSS upscaling is built on. Clamped to [0.25, 1.0].
     float renderScale = 1.0f;
 
-    // Use DLSS Ray Reconstruction instead of the built-in denoiser + bilinear
-    // upscale. Ignored when Streamline reports Ray Reconstruction unavailable.
+    // Use ordinary DLSS Super Resolution in raytracing mode, or DLSS Ray
+    // Reconstruction in path tracing mode. Ignored when the selected feature
+    // is unavailable.
     bool useDLSS = false;
 
     // DLSS preset. While DLSS is on this replaces renderScale: DLSS dictates
@@ -126,7 +127,7 @@ private:
         DirectX::XMFLOAT4X4 prevViewProj; // previous frame (motion vectors)
         DirectX::XMFLOAT4   camRight;     // xyz = right, w = tanHalfFov * aspect
         DirectX::XMFLOAT4   camUp;        // xyz = up,    w = tanHalfFov
-        DirectX::XMFLOAT4   camFwd;       // xyz = forward
+        DirectX::XMFLOAT4   camFwd;       // xyz = forward, w = camera near plane
         DirectX::XMFLOAT4   prevParams;   // x = 1 when prevViewProj is valid
     };
 
@@ -225,11 +226,11 @@ private:
     ComPtr<ID3D12Resource>          m_albedo;   // primary-hit base color (RGBA32F), u3
     ComPtr<ID3D12Resource>          m_motion;   // pixel-space motion vectors (RG32F), u4
 
-    // Guide buffers for DLSS Ray Reconstruction (written by the ray tracer,
-    // consumed by DLSS; our own denoiser does not read them).
+    // Guide buffers written by the ray tracer and consumed by DLSS. The depth
+    // texture holds hardware depth for SR and view-space linear Z for RR.
     ComPtr<ID3D12Resource>          m_normalRough;  // normal.xyz + roughness (RGBA16F), u5
     ComPtr<ID3D12Resource>          m_specAlbedo;   // specular albedo F0 (RGBA16F), u6
-    ComPtr<ID3D12Resource>          m_linearDepth;  // primary-hit distance (R32F), u7
+    ComPtr<ID3D12Resource>          m_linearDepth;  // mode-dependent depth (R32F), u7
     DescriptorHeap                  m_srvUavHeap;
     D3D12_CPU_DESCRIPTOR_HANDLE     m_outputUavCpu = {};
     D3D12_GPU_DESCRIPTOR_HANDLE     m_outputUavGpu = {}; // UAV table base (u0..u4)
@@ -267,9 +268,9 @@ private:
     int                         m_prevRenderMode = -1;
     bool                        m_dlssActive = false; // DLSS ran last frame
 
-    // Cached DLSS::GetRenderSize answer. slDLSSDGetOptimalSettings is a
-    // Streamline round-trip, so it is re-asked only when the preset or the
-    // output size changes, not per frame.
+    // Cached DLSS::GetRenderSize answer. The SR and RR plugins may choose
+    // different input sizes, so the selected feature is part of the key.
+    int      m_dlssSizeFeature = -1;
     int      m_dlssSizeQuality = -1;
     uint32_t m_dlssSizeOutW = 0, m_dlssSizeOutH = 0;
     uint32_t m_dlssRenderW = 0, m_dlssRenderH = 0;

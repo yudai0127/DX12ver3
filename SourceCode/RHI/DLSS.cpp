@@ -260,37 +260,149 @@ namespace
 //-----------------------------------------------------------------------------
 // GetRenderSize  -  ask DLSS what input resolution this preset expects.
 //-----------------------------------------------------------------------------
-bool DLSS::GetRenderSize(Quality q, uint32_t outWidth, uint32_t outHeight,
+bool DLSS::GetRenderSize(Feature feature, Quality q,
+                         uint32_t outWidth, uint32_t outHeight,
                          uint32_t& renderWidth, uint32_t& renderHeight)
 {
 #if DX12_HAS_STREAMLINE
-    if (!m_initialized || !m_rrSupported) return false;
+    if (!m_initialized) return false;
 
-    sl::DLSSDOptions opt{};
-    opt.mode = ToSLMode(q);
-    opt.outputWidth = outWidth;
-    opt.outputHeight = outHeight;
+    if (feature == Feature::SuperResolution)
+    {
+        if (!m_srSupported) return false;
+        sl::DLSSOptions opt{};
+        opt.mode = ToSLMode(q);
+        opt.outputWidth = outWidth;
+        opt.outputHeight = outHeight;
 
-    sl::DLSSDOptimalSettings settings{};
-    if (slDLSSDGetOptimalSettings(opt, settings) != sl::Result::eOk) return false;
-    if (settings.optimalRenderWidth == 0 || settings.optimalRenderHeight == 0)
-        return false;
+        sl::DLSSOptimalSettings settings{};
+        if (slDLSSGetOptimalSettings(opt, settings) != sl::Result::eOk) return false;
+        if (settings.optimalRenderWidth == 0 || settings.optimalRenderHeight == 0)
+            return false;
+        renderWidth = settings.optimalRenderWidth;
+        renderHeight = settings.optimalRenderHeight;
+    }
+    else
+    {
+        if (!m_rrSupported) return false;
+        sl::DLSSDOptions opt{};
+        opt.mode = ToSLMode(q);
+        opt.outputWidth = outWidth;
+        opt.outputHeight = outHeight;
 
-    renderWidth = settings.optimalRenderWidth;
-    renderHeight = settings.optimalRenderHeight;
+        sl::DLSSDOptimalSettings settings{};
+        if (slDLSSDGetOptimalSettings(opt, settings) != sl::Result::eOk) return false;
+        if (settings.optimalRenderWidth == 0 || settings.optimalRenderHeight == 0)
+            return false;
+        renderWidth = settings.optimalRenderWidth;
+        renderHeight = settings.optimalRenderHeight;
+    }
     return true;
 #else
-    (void)q; (void)outWidth; (void)outHeight;
+    (void)feature; (void)q; (void)outWidth; (void)outHeight;
     (void)renderWidth; (void)renderHeight;
     return false;
 #endif
 }
 
-bool DLSS::EvaluateRR(ID3D12GraphicsCommandList* cmdList, const RRFrame& f)
+bool DLSS::EvaluateSR(ID3D12GraphicsCommandList* cmdList, const Frame& f)
+{
+#if DX12_HAS_STREAMLINE
+    if (!m_initialized || !m_srSupported || !cmdList) return false;
+    if (!f.colorIn || !f.colorOut || !f.depth || !f.motionVectors) return false;
+
+    const sl::ViewportHandle viewport(0);
+
+    sl::DLSSOptions opt{};
+    opt.mode = ToSLMode(f.quality);
+    opt.outputWidth = f.outputWidth;
+    opt.outputHeight = f.outputHeight;
+    opt.colorBuffersHDR = sl::Boolean::eTrue;
+    opt.useAutoExposure = sl::Boolean::eTrue;
+    opt.alphaUpscalingEnabled = sl::Boolean::eFalse;
+    if (slDLSSSetOptions(viewport, opt) != sl::Result::eOk)
+    {
+        m_status = "Streamline: slDLSSSetOptions failed";
+        Log("[DLSS] slDLSSSetOptions failed");
+        return false;
+    }
+
+    sl::FrameToken* frame = nullptr;
+    if (slGetNewFrameToken(frame) != sl::Result::eOk || !frame) return false;
+
+    sl::Constants c{};
+    c.cameraViewToClip = ToSL(f.viewToClip);
+    c.clipToCameraView = ToSL(f.clipToView);
+    c.clipToPrevClip = ToSL(f.clipToPrevClip);
+    c.prevClipToClip = ToSL(f.prevClipToClip);
+    c.jitterOffset = { f.jitter.x, f.jitter.y };
+    c.mvecScale = { 1.0f / (float)f.renderWidth, 1.0f / (float)f.renderHeight };
+    c.cameraPos = { f.cameraPos.x, f.cameraPos.y, f.cameraPos.z };
+    c.cameraUp = { f.cameraUp.x, f.cameraUp.y, f.cameraUp.z };
+    c.cameraRight = { f.cameraRight.x, f.cameraRight.y, f.cameraRight.z };
+    c.cameraFwd = { f.cameraFwd.x, f.cameraFwd.y, f.cameraFwd.z };
+    c.cameraNear = f.nearZ;
+    c.cameraFar = f.farZ;
+    c.cameraFOV = f.fovY;
+    c.cameraAspectRatio = f.aspect;
+    c.depthInverted = sl::Boolean::eFalse;
+    c.cameraMotionIncluded = sl::Boolean::eTrue;
+    c.motionVectors3D = sl::Boolean::eFalse;
+    c.motionVectorsDilated = sl::Boolean::eFalse;
+    c.motionVectorsJittered = sl::Boolean::eFalse;
+    c.orthographicProjection = sl::Boolean::eFalse;
+    c.reset = f.reset ? sl::Boolean::eTrue : sl::Boolean::eFalse;
+
+    if (slSetConstants(c, *frame, viewport) != sl::Result::eOk)
+    {
+        m_status = "Streamline: slSetConstants failed";
+        Log("[DLSS] slSetConstants failed");
+        return false;
+    }
+
+    sl::Extent inExt{ 0, 0, f.renderWidth, f.renderHeight };
+    sl::Extent outExt{ 0, 0, f.outputWidth, f.outputHeight };
+    sl::Resource rColorIn = Tex(f.colorIn);
+    sl::Resource rColorOut = Tex(f.colorOut);
+    sl::Resource rDepth = Tex(f.depth);
+    sl::Resource rMvec = Tex(f.motionVectors);
+
+    const sl::ResourceLifecycle life = sl::ResourceLifecycle::eValidUntilPresent;
+    sl::ResourceTag tags[] = {
+        { &rColorIn,  sl::kBufferTypeScalingInputColor,  life, &inExt  },
+        { &rColorOut, sl::kBufferTypeScalingOutputColor, life, &outExt },
+        { &rDepth,    sl::kBufferTypeDepth,              life, &inExt  },
+        { &rMvec,     sl::kBufferTypeMotionVectors,      life, &inExt  },
+    };
+
+    if (slSetTagForFrame(*frame, viewport, tags, _countof(tags), cmdList)
+        != sl::Result::eOk)
+    {
+        m_status = "Streamline: slSetTagForFrame failed";
+        Log("[DLSS] slSetTagForFrame failed");
+        return false;
+    }
+
+    const sl::BaseStructure* inputs[] = { &viewport };
+    if (slEvaluateFeature(sl::kFeatureDLSS, *frame, inputs, _countof(inputs),
+                          cmdList) != sl::Result::eOk)
+    {
+        m_status = "Streamline: slEvaluateFeature(DLSS) failed";
+        Log("[DLSS] slEvaluateFeature(DLSS) failed");
+        return false;
+    }
+    return true;
+#else
+    (void)cmdList; (void)f;
+    return false;
+#endif
+}
+
+bool DLSS::EvaluateRR(ID3D12GraphicsCommandList* cmdList, const Frame& f)
 {
 #if DX12_HAS_STREAMLINE
     if (!m_initialized || !m_rrSupported || !cmdList) return false;
-    if (!f.colorIn || !f.colorOut) return false;
+    if (!f.colorIn || !f.colorOut || !f.depth || !f.motionVectors) return false;
 
     const sl::ViewportHandle viewport(0);
 
@@ -367,7 +479,7 @@ bool DLSS::EvaluateRR(ID3D12GraphicsCommandList* cmdList, const RRFrame& f)
     sl::Resource rAlbedo = Tex(f.diffuseAlbedo);
     sl::Resource rSpec = Tex(f.specularAlbedo);
     sl::Resource rNormRough = Tex(f.normalRoughness);
-    sl::Resource rDepth = Tex(f.linearDepth);
+    sl::Resource rDepth = Tex(f.depth);
     sl::Resource rMvec = Tex(f.motionVectors);
 
     const sl::ResourceLifecycle life = sl::ResourceLifecycle::eValidUntilPresent;

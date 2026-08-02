@@ -53,7 +53,7 @@ public:
     {
         ScopeTrace = 0,     // DispatchRays
         ScopeResolve,       // denoiser / TAA compute
-        ScopeDLSS,          // Streamline evaluate (Ray Reconstruction)
+        ScopeDLSS,          // Streamline evaluate (Super Resolution or RR)
         ScopePost,          // tonemap/upscale + copy to the back buffer
         ScopeCount
     };

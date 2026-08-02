@@ -107,13 +107,26 @@ void GpuTimer::EndFrame(ID3D12GraphicsCommandList* cmd, uint32_t frameIndex)
     // 終了時刻を記録
     cmd->EndQuery(m_queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, endIndex);
 
-    // クエリヒープの内容を Readback バッファへコピーする命令を積む
-    //   （GPUが実行したとき、結果がバッファに書かれる）
+    // Resolve only timestamps that were actually written this frame. D3D12's
+    // debug layer rejects ResolveQueryData for an unused timestamp slot.
     cmd->ResolveQueryData(
         m_queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
-        beginIndex, TIMESTAMPS_PER_FRAME,
+        beginIndex, 2,
         m_readbackBuf.Get(),
         sizeof(uint64_t) * beginIndex);
+
+    for (uint32_t s = 0; s < (uint32_t)ScopeCount; ++s)
+    {
+        if (!m_scopeUsed[frameIndex * (uint32_t)ScopeCount + s])
+            continue;
+
+        const UINT scopeBegin = beginIndex + 2 + 2 * s;
+        cmd->ResolveQueryData(
+            m_queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+            scopeBegin, 2,
+            m_readbackBuf.Get(),
+            sizeof(uint64_t) * scopeBegin);
+    }
 }
 
 //-----------------------------------------------------------------------------

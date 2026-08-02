@@ -59,12 +59,16 @@ public:
                          REFIID riid, void** out);
 
     //-------------------------------------------------------------------
-    // DLSS Ray Reconstruction
+    // DLSS Super Resolution / Ray Reconstruction
     //-------------------------------------------------------------------
 
     // Quality presets, in increasing order of render resolution (and cost).
     // DLAA renders at the output resolution and only denoises / anti-aliases.
     enum class Quality { UltraPerformance, Performance, Balanced, Quality, DLAA };
+
+    // The two features use the same quality modes but can select different
+    // optimal input sizes for a given output resolution.
+    enum class Feature { SuperResolution, RayReconstruction };
 
     //  Everything the AI denoiser needs for one frame. Deliberately built
     //  from plain D3D12/DirectXMath types so callers never have to include
@@ -75,15 +79,16 @@ public:
     //  full output resolution. Every buffer is expected in the
     //  UNORDERED_ACCESS state.
     //-------------------------------------------------------------------
-    struct RRFrame
+    struct Frame
     {
         // Buffers
-        ID3D12Resource* colorIn = nullptr;        // noisy tonemapped colour
-        ID3D12Resource* colorOut = nullptr;       // upscaled, denoised result
+        ID3D12Resource* colorIn = nullptr;        // linear HDR at render resolution
+        ID3D12Resource* colorOut = nullptr;       // linear HDR at output resolution
         ID3D12Resource* diffuseAlbedo = nullptr;
         ID3D12Resource* specularAlbedo = nullptr;
         ID3D12Resource* normalRoughness = nullptr; // normal.xyz + roughness.w
-        ID3D12Resource* linearDepth = nullptr;
+        // Hardware depth for Super Resolution; view-space linear Z for RR.
+        ID3D12Resource* depth = nullptr;
         ID3D12Resource* motionVectors = nullptr;   // pixel space, prev - cur
 
         uint32_t renderWidth = 0, renderHeight = 0;
@@ -109,12 +114,18 @@ public:
     // DLSS reconstructs from a fixed ratio per preset, so feeding it anything
     // else costs performance and stops it cancelling the sub-pixel jitter.
     // Returns false if DLSS cannot answer, leaving the outputs untouched.
-    bool GetRenderSize(Quality q, uint32_t outWidth, uint32_t outHeight,
+    bool GetRenderSize(Feature feature, Quality q,
+                       uint32_t outWidth, uint32_t outHeight,
                        uint32_t& renderWidth, uint32_t& renderHeight);
+
+    // Run ordinary DLSS Super Resolution. This is the appropriate path for
+    // the deterministic raytracing mode: it antialiases and upscales without
+    // paying for the Ray Reconstruction denoiser.
+    bool EvaluateSR(ID3D12GraphicsCommandList* cmdList, const Frame& f);
 
     // Run Ray Reconstruction for this frame. Returns false (leaving colorOut
     // untouched) when DLSS is unavailable, so the caller can fall back.
-    bool EvaluateRR(ID3D12GraphicsCommandList* cmdList, const RRFrame& f);
+    bool EvaluateRR(ID3D12GraphicsCommandList* cmdList, const Frame& f);
 
 private:
     DLSS() = default;
