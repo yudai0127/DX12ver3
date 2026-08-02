@@ -26,6 +26,15 @@ public:
     /// @brief GPU時間(ms)を外から設定する（GpuTimer の結果を渡す）
     void SetGpuTimeMs(float ms) { m_gpuMs = ms; }
 
+    // One named GPU sub-pass (fed from GpuTimer's scopes). Passes that
+    // report 0 are hidden, so only what actually ran shows up.
+    static const int MAX_GPU_SCOPES = 4;
+    void SetGpuScopeMs(int index, const char* name, float ms)
+    {
+        if (index < 0 || index >= MAX_GPU_SCOPES) return;
+        m_scopeName[index] = name; m_scopeMs[index] = ms;
+    }
+
     /// @brief VRAM使用量を外から設定する（MB単位）
     void SetVramUsageMB(float usedMB, float budgetMB)
     {
@@ -43,6 +52,9 @@ public:
     float GetFrameTimeMs() const { return m_avgMs; }
 
 private:
+    const char* m_scopeName[MAX_GPU_SCOPES] = {};
+    float       m_scopeMs[MAX_GPU_SCOPES] = {};
+
     static const int HISTORY_SIZE = 120; // 履歴の長さ（約2秒分）
 
     std::array<float, HISTORY_SIZE> m_history = {}; // フレーム時間(ms)の履歴

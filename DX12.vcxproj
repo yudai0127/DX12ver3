@@ -116,9 +116,23 @@
     <None Include="HLSL\Mesh.hlsli" />
     <None Include="HLSL\PBR.hlsli" />
     <None Include="HLSL\Sprite.hlsli" />
-    <None Include="HLSL\PathTrace.hlsl" />
-    <None Include="HLSL\Denoise_CS.hlsl" />
-    <None Include="HLSL\Upscale_CS.hlsl" />
+    <FxCompile Include="HLSL\PathTrace.hlsl">
+      <FileType>Document</FileType>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">6.3</ShaderModel>
+      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">6.3</ShaderModel>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Library</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Library</ShaderType>
+    </FxCompile>
+    <FxCompile Include="HLSL\Denoise_CS.hlsl">
+      <FileType>Document</FileType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
+    </FxCompile>
+    <FxCompile Include="HLSL\Upscale_CS.hlsl">
+      <FileType>Document</FileType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
+    </FxCompile>
   </ItemGroup>
   <ItemGroup>
     <FxCompile Include="HLSL\GltfModel_PS.hlsl">
@@ -174,9 +188,11 @@
       <ObjectFileOutput Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Shader\%(Filename).cso</ObjectFileOutput>
       <ObjectFileOutput Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Shader\%(Filename).cso</ObjectFileOutput>
     </FxCompile>
-    <None Include="HLSL\TAA_CS.hlsl">
+    <FxCompile Include="HLSL\TAA_CS.hlsl">
       <FileType>Document</FileType>
-    </None>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compute</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compute</ShaderType>
+    </FxCompile>
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="Until\DirectXTK12-main\DirectXTK_Desktop_2022_Win10.vcxproj">

@@ -2,6 +2,7 @@
 #include "Graphics/ShaderManager.h"
 #include "Graphics/GltfModel.h"
 #include "RHI/DeviceManager.h"
+#include "RHI/GpuTimer.h"
 #include "RHI/DLSS.h"
 #include "RHI/GpuBuffer.h"
 #include "Core/Scene.h"
@@ -119,7 +120,8 @@ bool RaytracingRenderer::BuildPipeline()
     if (!dev5) return false;
 
     std::vector<char> lib =
-        ShaderManager::Instance()->CompileLibrary(L"HLSL/PathTrace.hlsl");
+        ShaderManager::Instance()->LoadOrCompileLibrary(
+            L"HLSL/PathTrace.hlsl", "PathTrace.cso");
     if (lib.empty())
     {
         OutputDebugStringW(L"[RT] PathTrace.hlsl compile failed\n");
@@ -176,8 +178,8 @@ bool RaytracingRenderer::BuildDenoisePipeline()
         return false;
     }
 
-    std::vector<char> cs = ShaderManager::Instance()->CompileFromFile(
-        L"HLSL/Denoise_CS.hlsl", L"main", L"cs_6_0");
+    std::vector<char> cs = ShaderManager::Instance()->LoadOrCompile(
+        L"HLSL/Denoise_CS.hlsl", "Denoise_CS.cso", L"main", L"cs_6_0");
     if (cs.empty())
     {
         OutputDebugStringW(L"[RT] Denoise_CS.hlsl compile failed\n");
@@ -196,8 +198,8 @@ bool RaytracingRenderer::BuildDenoisePipeline()
 
     // Raytracing mode's temporal resolve shares everything but the shader.
     // Failing to build it is not fatal: that mode just renders aliased.
-    std::vector<char> taaCs = ShaderManager::Instance()->CompileFromFile(
-        L"HLSL/TAA_CS.hlsl", L"main", L"cs_6_0");
+    std::vector<char> taaCs = ShaderManager::Instance()->LoadOrCompile(
+        L"HLSL/TAA_CS.hlsl", "TAA_CS.cso", L"main", L"cs_6_0");
     if (taaCs.empty())
     {
         OutputDebugStringW(L"[RT] TAA_CS.hlsl compile failed\n");
@@ -272,8 +274,8 @@ bool RaytracingRenderer::BuildUpscalePipeline()
         return false;
     }
 
-    std::vector<char> cs = ShaderManager::Instance()->CompileFromFile(
-        L"HLSL/Upscale_CS.hlsl", L"main", L"cs_6_0");
+    std::vector<char> cs = ShaderManager::Instance()->LoadOrCompile(
+        L"HLSL/Upscale_CS.hlsl", "Upscale_CS.cso", L"main", L"cs_6_0");
     if (cs.empty())
     {
         OutputDebugStringW(L"[RT] Upscale_CS.hlsl compile failed\n");
@@ -988,6 +990,9 @@ void RaytracingRenderer::Render(const Camera& camera)
     ID3D12GraphicsCommandList4* cmd4 = cmdCtx.GetCommandList4();
     if (!cmd4) return;
 
+    // Per-pass GPU timing (overlay breakdown); null when timing is off.
+    GpuTimer* gtimer = GpuTimer::Active();
+
     // ---- keep the TLAS in step with the scene ------------------------
     // Moving, rotating or scaling an object only changes where its geometry
     // sits, so the BLAS stay untouched and the top level is rebuilt in place.
@@ -1046,11 +1051,19 @@ void RaytracingRenderer::Render(const Camera& camera)
     const DLSS::Quality quality = (DLSS::Quality)qi;
     if (wantDLSS)
     {
-        uint32_t rw = 0, rh = 0;
-        if (DLSS::Instance().GetRenderSize(quality, m_width, m_height, rw, rh))
+        if (m_dlssSizeQuality != qi ||
+            m_dlssSizeOutW != m_width || m_dlssSizeOutH != m_height)
         {
-            m_renderWidth = rw;
-            m_renderHeight = rh;
+            m_dlssSizeValid = DLSS::Instance().GetRenderSize(
+                quality, m_width, m_height, m_dlssRenderW, m_dlssRenderH);
+            m_dlssSizeQuality = qi;
+            m_dlssSizeOutW = m_width;
+            m_dlssSizeOutH = m_height;
+        }
+        if (m_dlssSizeValid)
+        {
+            m_renderWidth = m_dlssRenderW;
+            m_renderHeight = m_dlssRenderH;
         }
     }
 
@@ -1171,7 +1184,9 @@ void RaytracingRenderer::Render(const Camera& camera)
     desc.Width = m_renderWidth;   // trace only the rendered sub-rectangle
     desc.Height = m_renderHeight;
     desc.Depth = 1;
+    if (gtimer) gtimer->BeginScope(cmd4, GpuTimer::ScopeTrace);
     cmd4->DispatchRays(&desc);
+    if (gtimer) gtimer->EndScope(cmd4, GpuTimer::ScopeTrace);
 
     // ---- temporal resolve: the path tracer's denoiser, or raytracing's TAA --
     // Both read and write the same buffers with the same constants, so they
@@ -1231,7 +1246,9 @@ void RaytracingRenderer::Render(const Camera& camera)
         cmd4->SetPipelineState(wantTAA ? m_taaPSO.Get() : m_denoisePSO.Get());
         cmd4->SetComputeRootDescriptorTable(0, m_denoiseTableGpu[phase]);
         cmd4->SetComputeRootConstantBufferView(1, m_denoiseCB.GetGpuAddress());
+        if (gtimer) gtimer->BeginScope(cmd4, GpuTimer::ScopeResolve);
         cmd4->Dispatch((m_renderWidth + 7) / 8, (m_renderHeight + 7) / 8, 1);
+        if (gtimer) gtimer->EndScope(cmd4, GpuTimer::ScopeResolve);
 
         cmdCtx.ResourceBarrier(m_accum.Get(),
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
@@ -1326,12 +1343,16 @@ void RaytracingRenderer::Render(const Camera& camera)
         f.reset = !m_hasPrevVP || (renderMode != m_prevRenderMode);
         f.quality = quality;
 
+        if (gtimer) gtimer->BeginScope(cmd4, GpuTimer::ScopeDLSS);
         m_dlssActive = DLSS::Instance().EvaluateRR(cmd4, f);
+        if (gtimer) gtimer->EndScope(cmd4, GpuTimer::ScopeDLSS);
 
         // Streamline binds its own descriptor heaps and does not restore ours,
         // so anything we dispatch afterwards must re-bind them.
         cmd4->SetDescriptorHeaps(1, heaps);
     }
+
+    if (gtimer) gtimer->BeginScope(cmd4, GpuTimer::ScopePost);
 
     // Resolve into the LDR back-buffer image: either tonemap DLSS's HDR result
     // (already at output resolution) or bilinearly stretch our own LDR image.
@@ -1382,6 +1403,8 @@ void RaytracingRenderer::Render(const Camera& camera)
         D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
     cmdCtx.ResourceBarrier(m_upscaled.Get(),
         D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    if (gtimer) gtimer->EndScope(cmd4, GpuTimer::ScopePost);
 
     // Remember this frame's camera for next frame's motion vectors. This must
     // happen every frame, not just when the denoiser runs.

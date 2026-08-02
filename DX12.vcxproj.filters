@@ -95,10 +95,6 @@
     <None Include="HLSL\Mesh.hlsli" />
     <None Include="HLSL\GltfModel.hlsli" />
     <None Include="HLSL\PBR.hlsli" />
-    <None Include="HLSL\PathTrace.hlsl" />
-    <None Include="HLSL\Denoise_CS.hlsl" />
-    <None Include="HLSL\Upscale_CS.hlsl" />
-    <None Include="HLSL\TAA_CS.hlsl" />
   </ItemGroup>
   <ItemGroup>
     <FxCompile Include="HLSL\Sprite_PS.hlsl" />
@@ -107,5 +103,9 @@
     <FxCompile Include="HLSL\Mesh_PS.hlsl" />
     <FxCompile Include="HLSL\GltfModel_VS.hlsl" />
     <FxCompile Include="HLSL\GltfModel_PS.hlsl" />
+    <FxCompile Include="HLSL\Denoise_CS.hlsl" />
+    <FxCompile Include="HLSL\PathTrace.hlsl" />
+    <FxCompile Include="HLSL\TAA_CS.hlsl" />
+    <FxCompile Include="HLSL\Upscale_CS.hlsl" />
   </ItemGroup>
 </Project>

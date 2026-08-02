@@ -24,6 +24,20 @@ bool SwapChain::Initialize(IDXGIFactory6* factory,
     m_rtvDescriptorSize = device->GetDescriptorHandleIncrementSize(
         D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
+    // Tearing support must be baked into the swap-chain flags at creation;
+    // Present() then opts in per call when vsync is off.
+    {
+        BOOL allowTearing = FALSE;
+        ComPtr<IDXGIFactory5> factory5;
+        if (SUCCEEDED(factory->QueryInterface(IID_PPV_ARGS(&factory5))) &&
+            SUCCEEDED(factory5->CheckFeatureSupport(
+                DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+                &allowTearing, sizeof(allowTearing))))
+        {
+            m_tearingSupported = (allowTearing == TRUE);
+        }
+    }
+
     // ---- スワップチェーン生成 -----------------------------------------
     DXGI_SWAP_CHAIN_DESC1 scDesc = {};
     scDesc.Width = width;
@@ -37,6 +51,8 @@ bool SwapChain::Initialize(IDXGIFactory6* factory,
     scDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;  // DX12 推奨
     scDesc.AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED;
     scDesc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+    if (m_tearingSupported)
+        scDesc.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
 
     ComPtr<IDXGISwapChain1> swapChain1;
     if (FAILED(factory->CreateSwapChainForHwnd(
@@ -116,7 +132,11 @@ void SwapChain::Present(uint32_t syncInterval)
     // Present 前にバックバッファのステートが
     // D3D12_RESOURCE_STATE_PRESENT であることが必須。
     // （CommandContext::ResourceBarrier で遷移しておくこと）
-    m_swapChain->Present(syncInterval, 0);
+    // DXGI only accepts the tearing flag with syncInterval 0, and only on
+    // a swap chain created with ALLOW_TEARING.
+    const UINT flags = (syncInterval == 0 && m_tearingSupported)
+        ? DXGI_PRESENT_ALLOW_TEARING : 0;
+    m_swapChain->Present(syncInterval, flags);
 }
 
 //-----------------------------------------------------------------------------
@@ -132,11 +152,16 @@ bool SwapChain::Resize(uint32_t width, uint32_t height)
     // バッファを解放してからリサイズ
     ReleaseBuffers();
 
+    // ResizeBuffers must repeat the creation-time flags exactly.
+    UINT scFlags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+    if (m_tearingSupported)
+        scFlags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+
     if (FAILED(m_swapChain->ResizeBuffers(
         m_frameCount,
         width, height,
         BACK_BUFFER_FORMAT,
-        DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH)))
+        scFlags)))
     {
         OutputDebugStringW(L"[DX12] SwapChain::ResizeBuffers 失敗\n");
         return false;

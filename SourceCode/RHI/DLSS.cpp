@@ -294,9 +294,11 @@ bool DLSS::EvaluateRR(ID3D12GraphicsCommandList* cmdList, const RRFrame& f)
 
     const sl::ViewportHandle viewport(0);
 
-    // ---- options (re-sent when the output size or preset changes) ---------
-    if (!m_rrOptionsSet || m_rrOutW != f.outputWidth || m_rrOutH != f.outputHeight ||
-        m_rrQuality != (int)f.quality)
+    // ---- options (sent every frame) ---------------------------------------
+    // Besides the preset and output size these carry the camera matrices,
+    // which RR uses internally; re-sending them only on a size change handed
+    // DLSS a stale camera as soon as it moved. Streamline only rebuilds the
+    // feature when mode or size actually change, so this is a cheap copy.
     {
         sl::DLSSDOptions opt{};
         opt.mode = ToSLMode(f.quality);
@@ -317,10 +319,6 @@ bool DLSS::EvaluateRR(ID3D12GraphicsCommandList* cmdList, const RRFrame& f)
             Log("[DLSS] slDLSSDSetOptions failed");
             return false;
         }
-        m_rrOptionsSet = true;
-        m_rrOutW = f.outputWidth;
-        m_rrOutH = f.outputHeight;
-        m_rrQuality = (int)f.quality;
     }
 
     sl::FrameToken* frame = nullptr;
@@ -418,7 +416,6 @@ void DLSS::Shutdown()
     m_initialized = false;
     m_srSupported = false;
     m_rrSupported = false;
-    m_rrOptionsSet = false;
     m_status = "Streamline: shut down";
 #endif
 }

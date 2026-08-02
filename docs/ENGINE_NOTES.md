@@ -142,6 +142,24 @@ CAPCOM GDC2026 の資料が言っているのは「**IBL を Streaming RIS の�
 
 `WorldRayOrigin() + RayTCurrent() * WorldRayDirection()` と厳密に等しいので、RayGen 側で `origin + dir * p.hitT` として再構築する。ペイロードは全レイに付いて回りレジスタ圧を決めるので、60 → 48 バイト。
 
+### 2.8 VSync 量子化 — 「DLSS で fps が落ちる」の正体
+
+144Hz パネルで vsync オンだと、取れる fps は **144 → 72 → 48** の階段しかない。フレーム実コストが 6.94ms（1 vblank）を少しでも超えた瞬間 72fps に落ち、揺らぎで 3 間隔のフレームが混ざると 60〜67fps に見える。「DLSS を入れたら 144 → 65 に落ちた」の大半はこの階段で、RR の実コスト（約 3ms、§2.4）とは別物。**負荷の違う構成が同じ ~15.4ms に収束して見えたのも同じ理由**（実コスト 7〜16ms は全部 60〜72fps のバケツに落ちる）。
+
+対処（実装済み）：
+
+- Camera / Light ウィンドウに **VSync チェックボックス**。性能を測るときは必ず外す
+- スワップチェーンは `DXGI_FEATURE_PRESENT_ALLOW_TEARING` を問い合わせ、対応時は `ALLOW_TEARING` フラグ付きで生成（`ResizeBuffers` も同フラグ必須）。vsync オフの Present だけ `DXGI_PRESENT_ALLOW_TEARING` を付ける
+- Performance オーバーレイの Frame ms と GPU ms の乖離 +「CPU bound / VSync」表示が診断の入口（チェックリスト 1-1 相当）
+
+あわせて直した DLSS 周りの無駄・バグ：
+
+- `slDLSSDGetOptimalSettings` を毎フレーム呼んでいた → プリセット / 出力解像度が変わった時だけに（`m_dlssSize*` キャッシュ）
+- `DLSSDOptions` を解像度変更時しか再送していなかった → **毎フレーム送る**。オプションにはカメラ行列（`worldToCameraView` / `cameraViewToWorld`）が入っており、古いままだとカメラを動かした瞬間の RR 品質が落ちる。Streamline はモード / サイズが変わらない限り feature を作り直さないので毎フレーム送って良い
+- `QueryVideoMemoryInfo` は 30 フレームに 1 回に間引き（チェックリスト 11-9）
+
+修正後の実測（Release / 742x418 → 1280x720 Balanced）: PT+DLSS **13.2ms**（理論値 13.1 とほぼ一致、無駄なし）、RT+DLSS **10.6ms**。RT 側は部品の和（レイ約1ms + RR 約3ms + 後段）より約 6ms 大きく、**未説明分が残っている**。切り分けのため `GpuTimer` にスコープ計測（`BeginScope/EndScope`）を追加し、Performance オーバーレイに **Trace / Denoise/TAA / DLSS RR / Post / Other** の GPU 内訳を表示するようにした（チェックリスト 1-2 の「Evaluate 単体計測」に対応。使っていないパスは 0 になり表示されない。結果は 2 フレーム遅れ）。
+
 ---
 
 ## 3. DLSS / Streamline のはまりどころ
@@ -196,6 +214,34 @@ SDK は **プリビルドの `streamline-sdk-v2.12.0`**（ソースからのビ�
 **ディスクリプタやリソースを新規に足したときは 1 に戻して確認すること。** Streamline のヒープ再バインド問題を見つけたのはこれ。切っていると、この種のバグはエラーではなく「画面が真っ黒」「ノイズまみれ」「TDR」としてしか現れない。
 
 デバッグレイヤー本体は常時オンのままで、こちらは軽い。
+
+### シェーダーの配置と、HLSL を出荷しない方法
+
+**実行時に読むファイルはすべてカレントディレクトリ基準の相対パス**（`HLSL/...`, `Shader/*.cso`, `Resources/...`）。VS から実行すると作業ディレクトリが `$(ProjectDir)` になるので気付かないが、exe を別フォルダに置いて単体で起動すると**そのフォルダに同じ構成が必要**。`HLSL` を忘れると `PathTrace.hlsl` が開けず「Raytracing (DXR): not available」でラスタライザに落ちる（§4 の症状そのもの）。
+
+シェーダーの読み込み経路は 2 通りある：
+
+| シェーダー | 経路 |
+|---|---|
+| Mesh / Sprite | `LoadCSO`（`Shader/*.cso`）。ビルド時に FxCompile が出力 |
+| GltfModel | 既定は `LoadCSO`。`ReloadShaders()` の間だけ `m_hotReload = true` で実行時コンパイル |
+| PathTrace / Denoise_CS / TAA_CS / Upscale_CS | `LoadOrCompile` / `LoadOrCompileLibrary` |
+
+`LoadOrCompile` は **`.hlsl` があればコンパイル、無ければ `Shader/*.cso` を読む**。切り替えスイッチは無い：作業ツリーには `.hlsl` があるのでホットリロードが効き、出荷フォルダには `HLSL` を置かないので自動的に `.cso` を使う。
+
+**出荷時のビルド設定（VS の「HLSL コンパイラ」）**
+
+`PathTrace.hlsl` を FxCompile に載せるときは：
+
+- シェーダーの種類 = **ライブラリ**、シェーダーモデル = **6.3 以上**
+- **エントリポイントを空にする**（ライブラリに `main` は無い。既定の `main` が残ると `-E main` が渡って失敗する）
+- オブジェクトファイル名 = `Shader\%(Filename).cso`
+
+`Denoise_CS` / `TAA_CS` / `Upscale_CS` は 種類 = 計算、モデル = 6.0、エントリ = `main`、出力先は同じ。
+
+**`-Zi` / `-Qembed_debug` を付けたままにしないこと。** これは HLSL のソースを .cso に丸ごと埋め込むので、伏せる目的が完全に無意味になる。出荷構成では デバッグ情報を切り、追加オプションに `-Qstrip_debug -Qstrip_reflect` を入れる。なお DXIL は逆アセンブル可能なので、.cso 化は暗号化ではなく難読化。
+
+**副産物**: 全シェーダーが .cso なら `dxcompiler.dll`（と署名用 `dxil.dll`）を出荷しなくて済む。実行時コンパイルに頼ると、これらの同梱と、署名されていない DXIL が Developer Mode 無効の環境で弾かれる問題を抱えることになる。`dxcompiler.lib` をリンクしている（`DX12.vcxproj`）ので、DLL 自体は exe の起動条件であることに注意。
 
 ---
 

@@ -41,6 +41,22 @@ public:
     std::vector<char> CompileLibrary(const wchar_t* hlslPath,
         const wchar_t* target = L"lib_6_3");
 
+    /// @brief Compile the .hlsl when it exists, otherwise load the .cso.
+    ///        A working tree has the sources, so hot reload keeps working;
+    ///        a shipped build ships Shader/*.cso and no HLSL folder, so the
+    ///        shader source never leaves the build machine.
+    /// @param hlslPath path checked first (e.g. L"HLSL/Denoise_CS.hlsl")
+    /// @param csoName  name under Shader/ used when the .hlsl is absent
+    std::vector<char> LoadOrCompile(const wchar_t* hlslPath,
+        const char* csoName,
+        const wchar_t* entryPoint,
+        const wchar_t* target);
+
+    /// @brief LoadOrCompile for a DXR shader library (no entry point).
+    std::vector<char> LoadOrCompileLibrary(const wchar_t* hlslPath,
+        const char* csoName,
+        const wchar_t* target = L"lib_6_3");
+
 private:
     ShaderManager() = default;
     ~ShaderManager() = default;

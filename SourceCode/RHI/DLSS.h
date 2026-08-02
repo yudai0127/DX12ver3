@@ -129,8 +129,5 @@ private:
     bool        m_srSupported = false;
     bool        m_rrSupported = false;
     bool        m_proxied = false;   // true once creation went through SL
-    bool        m_rrOptionsSet = false;
-    uint32_t    m_rrOutW = 0, m_rrOutH = 0; // options are re-sent when these change
-    int         m_rrQuality = -1;
     std::string m_status = "Streamline: not initialized";
 };

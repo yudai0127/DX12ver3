@@ -109,6 +109,13 @@ void Framework::Render(float elapsedTime)
 {
     // カメラ・ライト調整（授業 UNIT11 手順12）
     ImGui::Begin("Camera / Light");
+    // With vsync on a 144 Hz panel the frame rate quantises to 144/72/48:
+    // one vblank missed (e.g. DLSS's ~3ms) reads as a 144->65 collapse.
+    // Turn it off to see what a change really costs.
+    ImGui::Checkbox("VSync", &m_config.vsync);
+    if (!m_config.vsync && !DM()->GetSwapChain().IsTearingSupported())
+        ImGui::TextDisabled("(tearing unsupported: compositor may still cap)");
+    ImGui::Separator();
     ImGui::DragFloat3("Eye", &m_camera.eye.x, 0.1f);
     ImGui::DragFloat3("Focus", &m_camera.focus.x, 0.1f);
     ImGui::DragFloat("FOV", &m_camera.fovDegree, 0.5f, 10.0f, 120.0f);
@@ -216,6 +223,10 @@ void Framework::Render(float elapsedTime)
     // シェーダーエディタ（アプリ内で編集→保存＆リロード）
     m_shaderEditor.DrawImGui();
 
+    // QueryVideoMemoryInfo has a measurable CPU cost, so the VRAM readout
+    // refreshes a few times a second instead of every frame.
+    static uint32_t s_vramPoll = 0;
+    if ((s_vramPoll++ % 30) == 0)
     {
         ComPtr<IDXGIAdapter3> adapter3;
         if (SUCCEEDED(DM()->GetDeviceObj().GetAdapter()->QueryInterface(
@@ -400,6 +411,14 @@ void Framework::BeginFrame(const float clearColor[4])
     {
         m_gpuTimer.Resolve(m_frameIndex);
         m_frameTimer.SetGpuTimeMs(m_gpuTimer.GetGpuTimeMs());
+        m_frameTimer.SetGpuScopeMs(0, "Trace",
+            m_gpuTimer.GetScopeMs(GpuTimer::ScopeTrace));
+        m_frameTimer.SetGpuScopeMs(1, "Denoise/TAA",
+            m_gpuTimer.GetScopeMs(GpuTimer::ScopeResolve));
+        m_frameTimer.SetGpuScopeMs(2, "DLSS RR",
+            m_gpuTimer.GetScopeMs(GpuTimer::ScopeDLSS));
+        m_frameTimer.SetGpuScopeMs(3, "Post",
+            m_gpuTimer.GetScopeMs(GpuTimer::ScopePost));
         m_gpuTimer.BeginFrame(cmd, m_frameIndex);
     }
     RenderStats::Instance().Reset();

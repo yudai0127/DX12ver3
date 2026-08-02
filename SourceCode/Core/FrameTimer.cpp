@@ -55,6 +55,18 @@ void FrameTimer::DrawImGui()
     {
         ImGui::Text("GPU:   %.3f ms", m_gpuMs);
 
+        // Per-pass breakdown; "Other" is whatever the scopes don't cover
+        // (TLAS rebuild, clears, ImGui, the back-buffer copy overhead).
+        float known = 0.0f;
+        for (int i = 0; i < MAX_GPU_SCOPES; ++i)
+        {
+            if (m_scopeMs[i] <= 0.0f || !m_scopeName[i]) continue;
+            ImGui::Text("  %-11s %.3f ms", m_scopeName[i], m_scopeMs[i]);
+            known += m_scopeMs[i];
+        }
+        if (known > 0.0f && m_gpuMs > known + 0.05f)
+            ImGui::Text("  %-11s %.3f ms", "Other", m_gpuMs - known);
+
         // ボトルネックの目安（フレーム時間のうち GPU が占める割合で判断）
         const float gpuRatio = (m_avgMs > 0.0f) ? m_gpuMs / m_avgMs : 0.0f;
         if (gpuRatio > 0.9f)

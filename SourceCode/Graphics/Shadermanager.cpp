@@ -9,6 +9,16 @@
 #include <wrl/client.h>
 using Microsoft::WRL::ComPtr;
 
+namespace
+{
+    bool FileExists(const wchar_t* path)
+    {
+        const DWORD attr = GetFileAttributesW(path);
+        return attr != INVALID_FILE_ATTRIBUTES &&
+               !(attr & FILE_ATTRIBUTE_DIRECTORY);
+    }
+}
+
 //-----------------------------------------------------------------------------
 // LoadCSO  ―  ビルド済み .cso をバイト列で読む
 //-----------------------------------------------------------------------------
@@ -200,4 +210,29 @@ std::vector<char> ShaderManager::CompileLibrary(const wchar_t* hlslPath,
 
     const char* p = static_cast<const char*>(shaderBlob->GetBufferPointer());
     return std::vector<char>(p, p + shaderBlob->GetBufferSize());
+}
+
+//-----------------------------------------------------------------------------
+// LoadOrCompile / LoadOrCompileLibrary
+//   The .hlsl decides: present means this is a working tree, so compile it
+//   and keep hot reload. Absent means a shipped build, so read the blob that
+//   was compiled at build time. Nothing has to be configured to switch.
+//-----------------------------------------------------------------------------
+std::vector<char> ShaderManager::LoadOrCompile(const wchar_t* hlslPath,
+    const char* csoName,
+    const wchar_t* entryPoint,
+    const wchar_t* target)
+{
+    if (FileExists(hlslPath))
+        return CompileFromFile(hlslPath, entryPoint, target);
+    return LoadCSO(csoName);
+}
+
+std::vector<char> ShaderManager::LoadOrCompileLibrary(const wchar_t* hlslPath,
+    const char* csoName,
+    const wchar_t* target)
+{
+    if (FileExists(hlslPath))
+        return CompileLibrary(hlslPath, target);
+    return LoadCSO(csoName);
 }

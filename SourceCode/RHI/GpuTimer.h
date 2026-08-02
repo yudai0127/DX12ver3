@@ -46,16 +46,48 @@ public:
     /// @brief 計測された GPU 時間(ms)
     float GetGpuTimeMs() const { return m_gpuTimeMs; }
 
+    // Named sub-sections of the frame, each with its own timestamp pair,
+    // so the overlay can show where the GPU time actually goes (the DLSS
+    // evaluate on its own, per the perf checklist).
+    enum Scope
+    {
+        ScopeTrace = 0,     // DispatchRays
+        ScopeResolve,       // denoiser / TAA compute
+        ScopeDLSS,          // Streamline evaluate (Ray Reconstruction)
+        ScopePost,          // tonemap/upscale + copy to the back buffer
+        ScopeCount
+    };
+
+    // Bracket a section on the current frame's command list. A section
+    // that is never entered in a frame reports 0 for it.
+    void BeginScope(ID3D12GraphicsCommandList* cmd, Scope s);
+    void EndScope(ID3D12GraphicsCommandList* cmd, Scope s);
+
+    // Result for the frame Resolve() last read (two frames back).
+    float GetScopeMs(Scope s) const { return m_scopeMs[s]; }
+
+    // The instance the frame loop drives, for callers that are not handed
+    // a reference (the ray tracer brackets its own passes with this).
+    static GpuTimer* Active() { return s_active; }
+
     bool IsValid() const { return m_queryHeap != nullptr; }
 
 private:
     // 1フレームあたり 2個のタイムスタンプ（開始・終了）
-    static const uint32_t TIMESTAMPS_PER_FRAME = 2;
+    // 2 for the whole frame, plus a begin/end pair per scope.
+    static const uint32_t TIMESTAMPS_PER_FRAME = 2 + 2 * ScopeCount;
 
     ComPtr<ID3D12QueryHeap> m_queryHeap;    // GPU側の時刻記録場所
     ComPtr<ID3D12Resource>  m_readbackBuf;  // CPUが読むためのバッファ
 
     uint64_t m_gpuFrequency = 0;    // GPUのタイムスタンプ周波数（1秒あたりのカウント）
     uint32_t m_frameCount = 0;
+    uint32_t m_currentFrame = 0;            // set by BeginFrame
+    float    m_scopeMs[ScopeCount] = {};
+    bool     m_scopeOpen[ScopeCount] = {};  // BeginScope seen this frame
+    // Which scopes were recorded, per in-flight frame; read by Resolve so
+    // a pass that stopped running does not keep showing stale numbers.
+    std::vector<uint8_t> m_scopeUsed;       // frameCount * ScopeCount
+    static GpuTimer* s_active;
     float    m_gpuTimeMs = 0.0f; // 計測結果
 };

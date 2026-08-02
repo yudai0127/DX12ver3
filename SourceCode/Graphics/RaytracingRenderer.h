@@ -267,6 +267,14 @@ private:
     int                         m_prevRenderMode = -1;
     bool                        m_dlssActive = false; // DLSS ran last frame
 
+    // Cached DLSS::GetRenderSize answer. slDLSSDGetOptimalSettings is a
+    // Streamline round-trip, so it is re-asked only when the preset or the
+    // output size changes, not per frame.
+    int      m_dlssSizeQuality = -1;
+    uint32_t m_dlssSizeOutW = 0, m_dlssSizeOutH = 0;
+    uint32_t m_dlssRenderW = 0, m_dlssRenderH = 0;
+    bool     m_dlssSizeValid = false;
+
     // Upscale pass: render-resolution image -> output-resolution image.
     // DLSS takes this job over once it is wired up; this is the fallback.
     ComPtr<ID3D12Resource>      m_upscaled;   // output-resolution LDR image

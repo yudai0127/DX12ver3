@@ -1,6 +1,8 @@
 #include "RHI/GpuTimer.h"
 #include <windows.h>
 
+GpuTimer* GpuTimer::s_active = nullptr;
+
 //-----------------------------------------------------------------------------
 // Initialize
 //-----------------------------------------------------------------------------
@@ -56,6 +58,8 @@ bool GpuTimer::Initialize(ID3D12Device* device, ID3D12CommandQueue* queue,
     }
     m_readbackBuf->SetName(L"GpuTimerReadback");
 
+    m_scopeUsed.assign(frameCount * (uint32_t)ScopeCount, 0);
+    s_active = this;
     return true;
 }
 
@@ -64,6 +68,7 @@ bool GpuTimer::Initialize(ID3D12Device* device, ID3D12CommandQueue* queue,
 //-----------------------------------------------------------------------------
 void GpuTimer::Uninitialize()
 {
+    if (s_active == this) s_active = nullptr;
     m_readbackBuf = nullptr;
     m_queryHeap = nullptr;
 }
@@ -77,6 +82,13 @@ void GpuTimer::BeginFrame(ID3D12GraphicsCommandList* cmd, uint32_t frameIndex)
 
     // このフレームが使うクエリ番号（開始 = 2N, 終了 = 2N+1）
     const UINT queryIndex = frameIndex * TIMESTAMPS_PER_FRAME;
+
+    m_currentFrame = frameIndex;
+    for (uint32_t s = 0; s < (uint32_t)ScopeCount; ++s)
+    {
+        m_scopeUsed[frameIndex * (uint32_t)ScopeCount + s] = 0;
+        m_scopeOpen[s] = false;
+    }
 
     // 「GPUがここを通った時刻を記録せよ」という命令を積む
     cmd->EndQuery(m_queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, queryIndex);
@@ -138,7 +150,45 @@ void GpuTimer::Resolve(uint32_t frameIndex)
             static_cast<float>(m_gpuFrequency) * 1000.0f;
     }
 
+    // Per-scope times for the same frame; unused scopes report 0.
+    for (uint32_t s = 0; s < (uint32_t)ScopeCount; ++s)
+    {
+        float ms = 0.0f;
+        if (m_scopeUsed[frameIndex * (uint32_t)ScopeCount + s])
+        {
+            const uint64_t sb = timestamps[2 + 2 * s];
+            const uint64_t se = timestamps[3 + 2 * s];
+            if (se > sb)
+                ms = static_cast<float>(se - sb) /
+                     static_cast<float>(m_gpuFrequency) * 1000.0f;
+        }
+        m_scopeMs[s] = ms;
+    }
+
     // 書き込みはしていないので、空の範囲で Unmap
     D3D12_RANGE writeRange = { 0, 0 };
     m_readbackBuf->Unmap(0, &writeRange);
+}
+
+//-----------------------------------------------------------------------------
+// BeginScope / EndScope - timestamp pair around one pass of the frame
+//-----------------------------------------------------------------------------
+void GpuTimer::BeginScope(ID3D12GraphicsCommandList* cmd, Scope s)
+{
+    if (!m_queryHeap || !cmd || s < 0 || s >= ScopeCount) return;
+    const UINT idx =
+        m_currentFrame * TIMESTAMPS_PER_FRAME + 2 + 2 * (UINT)s;
+    cmd->EndQuery(m_queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, idx);
+    m_scopeOpen[s] = true;
+}
+
+void GpuTimer::EndScope(ID3D12GraphicsCommandList* cmd, Scope s)
+{
+    if (!m_queryHeap || !cmd || s < 0 || s >= ScopeCount) return;
+    if (!m_scopeOpen[s]) return;   // no matching BeginScope this frame
+    const UINT idx =
+        m_currentFrame * TIMESTAMPS_PER_FRAME + 3 + 2 * (UINT)s;
+    cmd->EndQuery(m_queryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, idx);
+    m_scopeOpen[s] = false;
+    m_scopeUsed[m_currentFrame * (uint32_t)ScopeCount + (uint32_t)s] = 1;
 }

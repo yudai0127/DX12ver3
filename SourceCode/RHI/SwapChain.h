@@ -77,6 +77,10 @@ public:
 
     bool IsValid() const { return m_swapChain != nullptr; }
 
+    // True when DXGI can present with tearing. Without it a vsync-off
+    // Present still cannot exceed the panel refresh in flip model.
+    bool IsTearingSupported() const { return m_tearingSupported; }
+
 private:
     bool CreateRTVHeapAndViews();
     void ReleaseBuffers();
@@ -91,4 +95,5 @@ private:
     uint32_t m_height = 0;
     uint32_t m_frameCount = 2;
     uint32_t m_rtvDescriptorSize = 0;
+    bool     m_tearingSupported = false;
 };
