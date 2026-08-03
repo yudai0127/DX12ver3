@@ -46,7 +46,7 @@ cbuffer SceneCB : register(b0)
     float4 lightColor;
     float4 ambient;
     uint4  frame;       // x=rng seed, y=maxDepth, z=accumIndex, w=render mode
-    float4 envParams;   // x=env texture index (-1=none), y=intensity, z=samples/frame
+    float4 envParams;   // x=env texture index, y=intensity, z=spp, w=texture target height
     row_major float4x4 prevViewProj; // previous frame's view-projection
     // Camera basis, used to build primary rays exactly. Reconstructing them by
     // inverse-projecting the far plane loses catastrophic precision when the
@@ -626,6 +626,46 @@ void ShadowMiss(inout ShadowPayload s)
     s.visible = 1.0f;
 }
 
+// Estimate the UV footprint of this ray at the hit point. Ray tracing shaders
+// do not get the rasterizer's ddx/ddy derivatives, so SampleLevel(..., 0)
+// aliases badly when DLSS renders at a lower resolution. The triangle's UV to
+// world-area ratio converts one output pixel's world-space cone width to UVs.
+float estimateUvFootprint(Vertex v0, Vertex v1, Vertex v2, float3 worldNormal)
+{
+    float3 w0 = mul(ObjectToWorld3x4(), float4(v0.position, 1.0f));
+    float3 w1 = mul(ObjectToWorld3x4(), float4(v1.position, 1.0f));
+    float3 w2 = mul(ObjectToWorld3x4(), float4(v2.position, 1.0f));
+
+    float3 e1 = w1 - w0;
+    float3 e2 = w2 - w0;
+    float2 t1 = v1.texcoord - v0.texcoord;
+    float2 t2 = v2.texcoord - v0.texcoord;
+    float worldArea2 = length(cross(e1, e2));
+    float uvArea2 = abs(t1.x * t2.y - t1.y * t2.x);
+    if (worldArea2 < 1e-10f || uvArea2 < 1e-12f) return 0.0f;
+
+    // envParams.w is the final output height while DLSS is active. This is the
+    // DLSS mip bias in geometric form: materials retain the detail appropriate
+    // for the reconstructed image instead of the lower ray-dispatch resolution.
+    float targetHeight = max(envParams.w, 1.0f);
+    float pixelWorld = 2.0f * RayTCurrent() * camUp.w / targetHeight;
+    float grazing = max(abs(dot(normalize(worldNormal),
+                                -normalize(WorldRayDirection()))), 0.2f);
+    pixelWorld /= grazing;
+
+    return pixelWorld * sqrt(uvArea2 / worldArea2);
+}
+
+float textureMip(int textureIndex, float uvFootprint)
+{
+    uint width, height, levels;
+    gTextures[NonUniformResourceIndex(textureIndex)].GetDimensions(
+        0, width, height, levels);
+    float texelFootprint = uvFootprint * sqrt((float)width * (float)height);
+    float mip = log2(max(texelFootprint, 1.0f));
+    return clamp(mip, 0.0f, (float)max((int)levels - 1, 0));
+}
+
 //-----------------------------------------------------------------------------
 // Closest hit: fill surface data for the RayGen path loop.
 //-----------------------------------------------------------------------------
@@ -651,33 +691,46 @@ void ClosestHit(inout Payload payload,
 
     float3x3 obj2world = (float3x3)ObjectToWorld3x4();
     float3 Ngeom = normalize(mul(obj2world, nObj));
+    float uvFootprint = estimateUvFootprint(v0, v1, v2, Ngeom);
     float3 N = Ngeom;
     if (gNormalTex >= 0)
     {
         float3 T = normalize(mul(obj2world, tang.xyz));
         T = normalize(T - dot(T, Ngeom) * Ngeom);
         float3 B = cross(Ngeom, T) * tang.w;
-        float3 nT = gTextures[gNormalTex].SampleLevel(gSampler, uv, 0).xyz * 2.0f - 1.0f;
+        float normalMip = textureMip(gNormalTex, uvFootprint);
+        float3 nT = gTextures[NonUniformResourceIndex(gNormalTex)]
+            .SampleLevel(gSampler, uv, normalMip).xyz * 2.0f - 1.0f;
         nT.xy *= gNormalScale;
         N = normalize(nT.x * T + nT.y * B + nT.z * Ngeom);
     }
 
     float4 base = gBaseColor;
     if (gBaseColorTex >= 0)
-        base *= gTextures[gBaseColorTex].SampleLevel(gSampler, uv, 0);
+    {
+        float baseMip = textureMip(gBaseColorTex, uvFootprint);
+        base *= gTextures[NonUniformResourceIndex(gBaseColorTex)]
+            .SampleLevel(gSampler, uv, baseMip);
+    }
 
     float metallic = gMetallic;
     float roughness = gRoughness;
     if (gMRTex >= 0)
     {
-        float4 mr = gTextures[gMRTex].SampleLevel(gSampler, uv, 0);
+        float mrMip = textureMip(gMRTex, uvFootprint);
+        float4 mr = gTextures[NonUniformResourceIndex(gMRTex)]
+            .SampleLevel(gSampler, uv, mrMip);
         roughness *= mr.g;
         metallic *= mr.b;
     }
 
     float3 emissive = gEmissive.rgb;
     if (gEmissiveTex >= 0)
-        emissive *= gTextures[gEmissiveTex].SampleLevel(gSampler, uv, 0).rgb;
+    {
+        float emissiveMip = textureMip(gEmissiveTex, uvFootprint);
+        emissive *= gTextures[NonUniformResourceIndex(gEmissiveTex)]
+            .SampleLevel(gSampler, uv, emissiveMip).rgb;
+    }
 
     payload.albedo = base.rgb;
     payload.normal = N;

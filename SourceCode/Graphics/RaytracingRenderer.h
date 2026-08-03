@@ -173,9 +173,13 @@ private:
         DirectX::XMFLOAT4 lightDir = {}, lightColor = {}, ambient = {};
         float             intensity = 0.0f;
         float             envIntensity = 0.0f;
+        float             exposure = 0.0f;
         int               depth = 0;
         int               mode = 0;
         int               spp = 0;
+        int               dlssEnabled = 0;
+        int               dlssFeature = 0;
+        int               dlssQuality = 0;
         uint32_t          w = 0, h = 0;
     } m_prevKey;
     bool m_hasPrevKey = false;
@@ -267,6 +271,20 @@ private:
     // history has to be dropped when the mode changes or it ghosts across.
     int                         m_prevRenderMode = -1;
     bool                        m_dlssActive = false; // DLSS ran last frame
+
+    // DLSS temporal history is independent from the path-tracer accumulation
+    // history. Camera movement is represented by motion vectors and must not
+    // reset DLSS every frame; only a feature/configuration change does.
+    struct DlssHistoryKey
+    {
+        int      enabled = 0;
+        int      feature = 0;
+        int      quality = 0;
+        int      renderMode = 0;
+        uint32_t renderW = 0, renderH = 0;
+        uint32_t outputW = 0, outputH = 0;
+    } m_prevDlssHistoryKey;
+    bool                        m_hasPrevDlssHistoryKey = false;
 
     // Cached DLSS::GetRenderSize answer. The SR and RR plugins may choose
     // different input sizes, so the selected feature is part of the key.

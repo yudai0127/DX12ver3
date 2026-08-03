@@ -310,13 +310,54 @@ int Framework::Run(const FrameworkConfig& config)
     wc.lpszClassName = L"DX12FrameworkWindow";
     RegisterClassExW(&wc);
 
-    RECT rect = { 0, 0, (LONG)config.width, (LONG)config.height };
-    AdjustWindowRect(&rect, WS_OVERLAPPEDWINDOW, FALSE);
+    DWORD windowStyle = WS_OVERLAPPEDWINDOW;
+    DWORD windowExStyle = 0;
+    int windowX = CW_USEDEFAULT;
+    int windowY = CW_USEDEFAULT;
+    int windowWidth = (int)config.width;
+    int windowHeight = (int)config.height;
+    bool borderlessFullscreen = false;
+
+    if (config.fullscreen)
+    {
+        // Borderless fullscreen is the reliable flip-model path on modern
+        // Windows. Size the client area to the primary monitor and omit the
+        // title bar/taskbar instead of relying on DXGI exclusive fullscreen.
+        POINT origin = { 0, 0 };
+        HMONITOR monitor = MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY);
+        MONITORINFO mi = {};
+        mi.cbSize = sizeof(mi);
+        if (GetMonitorInfoW(monitor, &mi))
+        {
+            windowStyle = WS_POPUP;
+            windowExStyle = WS_EX_APPWINDOW;
+            windowX = mi.rcMonitor.left;
+            windowY = mi.rcMonitor.top;
+            windowWidth = mi.rcMonitor.right - mi.rcMonitor.left;
+            windowHeight = mi.rcMonitor.bottom - mi.rcMonitor.top;
+            borderlessFullscreen = true;
+        }
+    }
+    if (!borderlessFullscreen)
+    {
+        RECT rect = { 0, 0, (LONG)config.width, (LONG)config.height };
+        AdjustWindowRectEx(&rect, windowStyle, FALSE, windowExStyle);
+        windowWidth = rect.right - rect.left;
+        windowHeight = rect.bottom - rect.top;
+    }
+
+    // WM_SIZE can be delivered during window creation. Seed the intended
+    // client size first so it cannot try to resize an uninitialized device.
+    if (borderlessFullscreen)
+    {
+        m_config.width = (uint32_t)windowWidth;
+        m_config.height = (uint32_t)windowHeight;
+    }
 
     m_hwnd = CreateWindowExW(
-        0, L"DX12FrameworkWindow", config.title,
-        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-        rect.right - rect.left, rect.bottom - rect.top,
+        windowExStyle, L"DX12FrameworkWindow", config.title,
+        windowStyle, windowX, windowY,
+        windowWidth, windowHeight,
         nullptr, nullptr, GetModuleHandleW(nullptr), this);
 
     if (!m_hwnd)
@@ -324,6 +365,13 @@ int Framework::Run(const FrameworkConfig& config)
         OutputDebugStringW(L"[Framework] ウィンドウ生成失敗\n");
         return -1;
     }
+
+    // Use the actual client size for the swap chain and all render targets.
+    // In fullscreen this is the monitor resolution, not config.width/height.
+    RECT client = {};
+    GetClientRect(m_hwnd, &client);
+    m_config.width = (uint32_t)(client.right - client.left);
+    m_config.height = (uint32_t)(client.bottom - client.top);
 
     InitializeD3D(m_hwnd);
     Initialize();

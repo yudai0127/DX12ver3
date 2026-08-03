@@ -361,3 +361,7 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# Local packaged builds (publish these as GitHub Release assets, not Git blobs)
+DX12_Release_OTA_Off/
+DX12_Release_OTA_Off.zip

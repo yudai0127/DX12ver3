@@ -21,6 +21,8 @@ cbuffer UpscaleCB : register(b0)
     uint2 gTexDim;   // allocated size of the source texture
     uint  gTonemap;  // 1 = source is linear HDR and must be tonemapped
     float gExposure;
+    float gSharpness;
+    float3 gPadding;
 };
 
 // Same ACES curve the ray tracer uses, so both paths look alike.
@@ -49,6 +51,25 @@ void main(uint3 tid : SV_DispatchThreadID)
     // DLSS hands back linear HDR, so that path tonemaps here instead of in the
     // ray tracer; the fallback path is already tonemapped LDR.
     if (gTonemap != 0) c.rgb = tonemap(c.rgb);
+
+    // DLSS sharpening in older SDKs is deprecated, so restore a small amount
+    // of local contrast here. Work in display space and use only the four
+    // immediate neighbours to avoid the large halos of a wide unsharp mask.
+    if (gSharpness > 0.0f)
+    {
+        float2 texel = 1.0f / float2(gTexDim);
+        float3 n = gSrc.SampleLevel(gSmp, uv + float2(0.0f, -texel.y), 0).rgb;
+        float3 s = gSrc.SampleLevel(gSmp, uv + float2(0.0f,  texel.y), 0).rgb;
+        float3 e = gSrc.SampleLevel(gSmp, uv + float2( texel.x, 0.0f), 0).rgb;
+        float3 w = gSrc.SampleLevel(gSmp, uv + float2(-texel.x, 0.0f), 0).rgb;
+        if (gTonemap != 0)
+        {
+            n = tonemap(n); s = tonemap(s);
+            e = tonemap(e); w = tonemap(w);
+        }
+        float3 crossBlur = (n + s + e + w) * 0.25f;
+        c.rgb = saturate(c.rgb + (c.rgb - crossBlur) * gSharpness);
+    }
 
     gDst[tid.xy] = c;
 }

@@ -65,11 +65,16 @@ bool DLSS::Startup()
     pref.releaseCallback = nullptr;
     pref.logMessageCallback = nullptr;
     pref.flags = sl::PreferenceFlags::eDisableCLStateTracking |
-                 sl::PreferenceFlags::eAllowOTA |
-                 sl::PreferenceFlags::eLoadDownloadedPlugins |
                  // Required before slSetTagForFrame may be used; without it
                  // Streamline rejects every per-frame resource tag.
                  sl::PreferenceFlags::eUseFrameBasedResourceTagging;
+#if defined(DX12_ENABLE_DLSS_OTA)
+    // Define DX12_ENABLE_DLSS_OTA for a shipping build after image-quality
+    // validation. Until then, every build loads the plugins beside the EXE so
+    // captures from development and gaming PCs remain directly comparable.
+    pref.flags |= sl::PreferenceFlags::eAllowOTA |
+                  sl::PreferenceFlags::eLoadDownloadedPlugins;
+#endif
     // NGX refuses to initialise unless the app identifies itself. We have no
     // NVIDIA-assigned application id, so take the documented alternative: an
     // engine type plus version, and a project GUID.
@@ -254,6 +259,20 @@ namespace
         default:                              return sl::DLSSMode::eBalanced;
         }
     }
+
+    void ApplySRPresets(sl::DLSSOptions& opt)
+    {
+        // DLSS 310.x defaults Performance to transformer Preset M while
+        // Balanced uses Preset K. On RTX 3050 Laptop at 1080p, M measured
+        // roughly twice as expensive as K and outweighed the lower trace
+        // resolution. Keep Performance's 960x540 input ratio, but use the same
+        // supported K model as Balanced so the preset actually favours FPS.
+        opt.dlaaPreset = sl::DLSSPreset::ePresetK;
+        opt.qualityPreset = sl::DLSSPreset::ePresetK;
+        opt.balancedPreset = sl::DLSSPreset::ePresetK;
+        opt.performancePreset = sl::DLSSPreset::ePresetK;
+        opt.ultraPerformancePreset = sl::DLSSPreset::ePresetL;
+    }
 }
 #endif
 
@@ -274,6 +293,7 @@ bool DLSS::GetRenderSize(Feature feature, Quality q,
         opt.mode = ToSLMode(q);
         opt.outputWidth = outWidth;
         opt.outputHeight = outHeight;
+        ApplySRPresets(opt);
 
         sl::DLSSOptimalSettings settings{};
         if (slDLSSGetOptimalSettings(opt, settings) != sl::Result::eOk) return false;
@@ -320,6 +340,7 @@ bool DLSS::EvaluateSR(ID3D12GraphicsCommandList* cmdList, const Frame& f)
     opt.colorBuffersHDR = sl::Boolean::eTrue;
     opt.useAutoExposure = sl::Boolean::eTrue;
     opt.alphaUpscalingEnabled = sl::Boolean::eFalse;
+    ApplySRPresets(opt);
     if (slDLSSSetOptions(viewport, opt) != sl::Result::eOk)
     {
         m_status = "Streamline: slDLSSSetOptions failed";

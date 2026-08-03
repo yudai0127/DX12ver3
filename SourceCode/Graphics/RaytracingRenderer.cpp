@@ -9,6 +9,7 @@
 #include "Core/GameObject.h"
 #include "Component/ModelRenderer.h"
 #include "Camera/Camera.h"
+#include <cmath>
 #include <cstring>
 
 using namespace DirectX;
@@ -52,6 +53,8 @@ namespace
         DirectX::XMUINT2 texDim; // allocated source texture size
         uint32_t         tonemap; // 1 = source is linear HDR
         float            exposure;
+        float            sharpness;
+        float            pad0, pad1, pad2;
     };
 }
 
@@ -1124,9 +1127,53 @@ void RaytracingRenderer::Render(const Camera& camera)
         sc.camFwd   = XMFLOAT4(f3.x, f3.y, f3.z, camera.nearZ);
     }
 
+    // Reset the path-tracer accumulation whenever an input changes. This is
+    // intentionally separate from the DLSS history reset below: normal camera
+    // movement is handled by motion vectors and must keep DLSS history alive.
+    const int depth = (maxBounces < 1) ? 1 : (maxBounces > 8 ? 8 : maxBounces);
+    ResetKey key{};
+    key.eye = camera.eye; key.focus = camera.focus; key.fov = camera.fovDegree;
+    key.lightDir = camera.lightDir; key.lightColor = camera.lightColor;
+    key.ambient = camera.ambient; key.intensity = camera.lightIntensity;
+    key.envIntensity = envIntensity;
+    key.exposure = exposure;
+    key.depth = depth; key.mode = renderMode; key.spp = spp;
+    key.dlssEnabled = wantDLSS ? 1 : 0;
+    key.dlssFeature = (int)dlssFeature;
+    key.dlssQuality = qi;
+    key.w = m_renderWidth; key.h = m_renderHeight;
+    const bool accumulationReset =
+        !m_hasPrevKey || memcmp(&key, &m_prevKey, sizeof(ResetKey)) != 0;
+    if (accumulationReset)
+    {
+        m_accumIndex = 0;
+        m_prevKey = key;
+        m_hasPrevKey = true;
+    }
+
+    DlssHistoryKey dlssKey{};
+    dlssKey.enabled = wantDLSS ? 1 : 0;
+    dlssKey.feature = (int)dlssFeature;
+    dlssKey.quality = qi;
+    dlssKey.renderMode = renderMode;
+    dlssKey.renderW = m_renderWidth;
+    dlssKey.renderH = m_renderHeight;
+    dlssKey.outputW = m_width;
+    dlssKey.outputH = m_height;
+    const bool dlssConfigReset =
+        !m_hasPrevDlssHistoryKey ||
+        memcmp(&dlssKey, &m_prevDlssHistoryKey, sizeof(DlssHistoryKey)) != 0;
+    if (dlssConfigReset)
+    {
+        m_prevDlssHistoryKey = dlssKey;
+        m_hasPrevDlssHistoryKey = true;
+    }
+    const bool dlssHistoryReset = !m_hasPrevVP || dlssConfigReset;
+
     // Under DLSS the whole frame is rendered with one known sub-pixel offset
-    // (a Halton 2,3 sequence) which DLSS is told about, so it can resolve edges
-    // across frames. Without DLSS each sample keeps its own random jitter.
+    // (a Halton 2,3 sequence) which DLSS is told about. DLSS needs more jitter
+    // phases as the upscale ratio grows: 8 phases at native resolution and
+    // approximately 8 * scale^2 phases while upscaling (24 for 1080p Balanced).
     XMFLOAT2 jitter(0.0f, 0.0f);
     if (wantDLSS || wantTAA)
     {
@@ -1135,27 +1182,24 @@ void RaytracingRenderer::Render(const Camera& camera)
             while (i > 0) { f /= base; r += f * (i % base); i /= base; }
             return r;
         };
-        const uint32_t idx = (m_frameCounter % 16) + 1;
+        uint32_t phaseCount = 16;
+        if (wantDLSS)
+        {
+            const float sx = (float)m_width / (float)m_renderWidth;
+            const float sy = (float)m_height / (float)m_renderHeight;
+            const float scaleRatio = (sx > sy) ? sx : sy;
+            phaseCount = (uint32_t)std::ceil(8.0f * scaleRatio * scaleRatio);
+            if (phaseCount < 8) phaseCount = 8;
+        }
+        const uint32_t idx = (m_frameCounter % phaseCount) + 1;
         jitter = XMFLOAT2(halton(idx, 2) - 0.5f, halton(idx, 3) - 0.5f);
     }
-    sc.prevParams = XMFLOAT4(m_hasPrevVP ? 1.0f : 0.0f,
+    sc.prevParams = XMFLOAT4((m_hasPrevVP && !dlssConfigReset) ? 1.0f : 0.0f,
                              jitter.x, jitter.y, wantDLSS ? 1.0f : 0.0f);
 
-    // Reset accumulation whenever anything that changes the image changes.
-    const int depth = (maxBounces < 1) ? 1 : (maxBounces > 8 ? 8 : maxBounces);
-    ResetKey key;
-    key.eye = camera.eye; key.focus = camera.focus; key.fov = camera.fovDegree;
-    key.lightDir = camera.lightDir; key.lightColor = camera.lightColor;
-    key.ambient = camera.ambient; key.intensity = camera.lightIntensity;
-    key.envIntensity = envIntensity;
-    key.depth = depth; key.mode = renderMode; key.spp = spp;
-    key.w = m_renderWidth; key.h = m_renderHeight;
-    if (!m_hasPrevKey || memcmp(&key, &m_prevKey, sizeof(ResetKey)) != 0)
-    {
-        m_accumIndex = 0;
-        m_prevKey = key;
-        m_hasPrevKey = true;
-    }
+    // Texture filtering should target the final reconstructed resolution when
+    // DLSS is active. PathTrace.hlsl uses this height to estimate ray-cone LOD.
+    sc.envParams.w = (float)(wantDLSS ? m_height : m_renderHeight);
 
     // Accumulation is for our own denoiser only. Under DLSS the shader writes
     // this frame's colour and guides straight out: RR carries the temporal side
@@ -1221,7 +1265,8 @@ void RaytracingRenderer::Render(const Camera& camera)
         dc.cameraPos = sc.cameraPos;
         // The two passes share the history buffers, so a mode switch would
         // reproject one mode's image into the other's.
-        dc.temporalValid = (m_hasPrevVP && renderMode == m_prevRenderMode) ? 1 : 0;
+        dc.temporalValid =
+            (m_hasPrevVP && !dlssConfigReset && renderMode == m_prevRenderMode) ? 1 : 0;
         m_denoiseCB.Update(dc);
 
         // Order RayGen's output write before the denoiser overwrites it, and
@@ -1348,7 +1393,7 @@ void RaytracingRenderer::Render(const Camera& camera)
         // way for the same sample. Hence the negation - the ray tracer keeps
         // rendering with `jitter` itself.
         f.jitter = XMFLOAT2(-jitter.x, -jitter.y);
-        f.reset = !m_hasPrevVP || (renderMode != m_prevRenderMode);
+        f.reset = dlssHistoryReset;
         f.quality = quality;
 
         if (gtimer) gtimer->BeginScope(cmd4, GpuTimer::ScopeDLSS);
@@ -1376,6 +1421,14 @@ void RaytracingRenderer::Render(const Camera& camera)
         uc.texDim = XMUINT2(m_width, m_height); // buffers are always full size
         uc.tonemap = m_dlssActive ? 1u : 0u;    // DLSS returns linear HDR
         uc.exposure = exposure;
+        // A small post-reconstruction pass restores local contrast without
+        // turning the unstable high-frequency details into bright halos.
+        if (m_dlssActive && quality != DLSS::Quality::DLAA)
+        {
+            uc.sharpness = (quality == DLSS::Quality::Quality) ? 0.08f
+                         : (quality == DLSS::Quality::Balanced) ? 0.12f
+                         : 0.16f;
+        }
         m_upscaleCB.Update(uc);
 
         // Finish writing the source before reading it as a texture.

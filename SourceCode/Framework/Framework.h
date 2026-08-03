@@ -22,7 +22,7 @@ struct FrameworkConfig
     uint32_t       height = 720;
     uint32_t       frameCount = 2;
     bool           vsync = true;
-    bool           fullscreen = false;
+    bool           fullscreen = true;
 };
 
 //-----------------------------------------------------------------------------
